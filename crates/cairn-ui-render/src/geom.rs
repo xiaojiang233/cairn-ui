@@ -138,6 +138,88 @@ impl Rect {
     pub fn translate(&self, d: Point) -> Rect {
         Rect::new(self.x + d.x, self.y + d.y, self.width, self.height)
     }
+
+    /// 四边分别外扩（负数为收缩）。
+    pub fn outset(&self, top: f32, right: f32, bottom: f32, left: f32) -> Rect {
+        Rect::from_ltrb(
+            self.x - left,
+            self.y - top,
+            self.right() + right,
+            self.bottom() + bottom,
+        )
+    }
+
+    pub fn top_center(&self) -> Point {
+        Point::new(self.x + self.width / 2.0, self.y)
+    }
+
+    pub fn bottom_center(&self) -> Point {
+        Point::new(self.x + self.width / 2.0, self.bottom())
+    }
+}
+
+/// 只含等比缩放和平移的变换：`p' = p * scale + (dx, dy)`。
+///
+/// 不支持旋转和非等比缩放，所以矩形变换后仍是轴对齐矩形，像素对齐和矩形裁剪都保持简单。
+/// 用于悬停上浮、按下缩小这类整块内容的动效。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Affine {
+    pub scale: f32,
+    pub dx: f32,
+    pub dy: f32,
+}
+
+impl Default for Affine {
+    fn default() -> Self {
+        Affine::IDENTITY
+    }
+}
+
+impl Affine {
+    pub const IDENTITY: Affine = Affine {
+        scale: 1.0,
+        dx: 0.0,
+        dy: 0.0,
+    };
+
+    pub const fn translate(dx: f32, dy: f32) -> Affine {
+        Affine { scale: 1.0, dx, dy }
+    }
+
+    /// 以 `center` 为中心缩放 `k` 倍。
+    pub fn scale_about(center: Point, k: f32) -> Affine {
+        Affine {
+            scale: k,
+            dx: center.x * (1.0 - k),
+            dy: center.y * (1.0 - k),
+        }
+    }
+
+    pub fn is_identity(&self) -> bool {
+        *self == Affine::IDENTITY
+    }
+
+    /// 先做 `self`，再做 `outer`。
+    pub fn then(self, outer: Affine) -> Affine {
+        Affine {
+            scale: self.scale * outer.scale,
+            dx: self.dx * outer.scale + outer.dx,
+            dy: self.dy * outer.scale + outer.dy,
+        }
+    }
+
+    pub fn apply(&self, p: Point) -> Point {
+        Point::new(p.x * self.scale + self.dx, p.y * self.scale + self.dy)
+    }
+
+    pub fn apply_rect(&self, r: Rect) -> Rect {
+        Rect::new(
+            r.x * self.scale + self.dx,
+            r.y * self.scale + self.dy,
+            r.width * self.scale,
+            r.height * self.scale,
+        )
+    }
 }
 
 /// 设备（物理像素）坐标下的整数矩形。
@@ -211,8 +293,34 @@ impl Color {
         Color::rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
     }
 
+    /// 透明度用 0–1 的小数给出，例如 `Color::rgbaf(255, 255, 255, 0.08)` 是 8% 的白。
+    pub const fn rgbaf(r: u8, g: u8, b: u8, a: f32) -> Self {
+        Color {
+            r,
+            g,
+            b,
+            a: unit_to_u8(a),
+        }
+    }
+
     pub const fn with_alpha(self, a: u8) -> Self {
         Color { a, ..self }
+    }
+
+    /// 替换透明度（0–1）。
+    pub const fn with_opacity(self, a: f32) -> Self {
+        Color {
+            a: unit_to_u8(a),
+            ..self
+        }
+    }
+
+    /// 透明度乘以 `k`（0–1）。
+    pub fn fade(self, k: f32) -> Self {
+        Color {
+            a: (self.a as f32 * k.clamp(0.0, 1.0)).round() as u8,
+            ..self
+        }
     }
 
     /// 按比例与另一个颜色混合，`t = 0` 为自身，`t = 1` 为 `other`。
@@ -226,4 +334,15 @@ impl Color {
             m(self.a, other.a),
         )
     }
+}
+
+const fn unit_to_u8(a: f32) -> u8 {
+    let a = if a < 0.0 {
+        0.0
+    } else if a > 1.0 {
+        1.0
+    } else {
+        a
+    };
+    (a * 255.0 + 0.5) as u8
 }

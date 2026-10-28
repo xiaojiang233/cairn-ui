@@ -1,16 +1,16 @@
 //! 单行文本输入框：光标移动、删除、选区、剪贴板、中文输入法预编辑。
 
-use std::time::Instant;
-
 use cairn_ui_layout::MeasureInput;
 
+use crate::anim::Transition;
 use crate::element::element;
 use crate::text_edit::EditState;
-use crate::theme::{INPUT_PADDING, Theme};
+use crate::theme::Theme;
 use crate::widget::{Change, Event, EventCx, LayoutCx, PaintCx, Role, Semantics, Widget};
+use crate::widgets::common::drive;
 use crate::{
-    CursorIcon, FontFamily, ImeEvent, Key, KeyEvent, NamedKey, Painter, Point, PointerButton, Rect, Size, Style,
-    TextLayout, TextStyle,
+    CursorIcon, FontFamily, ImeEvent, Insets, Key, KeyEvent, NamedKey, Painter, Point, PointerButton, Rect, Shadow,
+    Size, Style, TextLayout, TextStyle,
 };
 
 /// 没有指定宽度时的内容区宽度（逻辑像素）。
@@ -30,6 +30,8 @@ type TextHandler<S> = Box<dyn Fn(&mut S, String)>;
 /// 值由应用持有：传入当前值，用 [`TextInput::on_change`] 接收用户的修改并写回状态。
 /// 设置了 `on_change` 时输入框是“受控”的——界面重建时若应用给的值与框内内容不同，
 /// 以应用为准（例如应用清空了它）。没设置 `on_change` 时只在应用给的值本身变化时才覆盖。
+///
+/// 外观来自主题的 [`Theme::input`]：悬停、获得焦点时填充与边框渐变，焦点光晕渐显。
 pub struct TextInput<S: 'static> {
     pub(crate) style: Style,
     pub(crate) key: Option<u64>,
@@ -46,13 +48,15 @@ pub struct TextInput<S: 'static> {
     content_width: f32,
     caret_on: bool,
     dragging: bool,
+    hover: Transition,
+    focus: Transition,
 }
 
 pub fn text_input<S: 'static>(value: impl Into<String>) -> TextInput<S> {
     let value = value.into();
     TextInput {
         style: Style {
-            padding: INPUT_PADDING,
+            padding: Insets::AUTO,
             ..Style::default()
         },
         key: None,
@@ -68,6 +72,8 @@ pub fn text_input<S: 'static>(value: impl Into<String>) -> TextInput<S> {
         content_width: DEFAULT_WIDTH,
         caret_on: true,
         dragging: false,
+        hover: Transition::default(),
+        focus: Transition::default(),
     }
 }
 
@@ -113,10 +119,11 @@ impl<S: 'static> TextInput<S> {
     }
 
     fn text_style(theme: &Theme) -> TextStyle {
+        let body = theme.typography.body;
         TextStyle {
-            font_size: theme.font_size,
-            line_height: theme.line_height,
-            weight: 400,
+            font_size: body.size,
+            line_height: theme.typography.line_height,
+            weight: body.weight,
             family: FontFamily::SansSerif,
         }
     }
@@ -213,7 +220,7 @@ impl<S: 'static> TextInput<S> {
     fn reset_blink(&mut self, cx: &mut EventCx<S>) {
         self.caret_on = true;
         if let Some(interval) = cx.caret_blink_interval() {
-            cx.request_timer(Instant::now() + interval);
+            cx.request_timer(cx.now() + interval);
         }
     }
 
@@ -377,9 +384,20 @@ impl<S: 'static> Widget<S> for TextInput<S> {
         change
     }
 
+    fn resolve_style(&self, style: &mut Style, theme: &Theme) {
+        if style.padding.is_auto() {
+            style.padding = theme.input.padding;
+        }
+    }
+
     fn measure(&mut self, cx: &mut LayoutCx, _input: &MeasureInput) -> Size {
         self.sync_layouts(cx);
         Size::new(DEFAULT_WIDTH, self.line_height())
+    }
+
+    fn visual_bounds(&self, bounds: Rect, theme: &Theme) -> Rect {
+        let e = theme.input.focus_glow.extent();
+        bounds.outset(e[0], e[1], e[2], e[3])
     }
 
     fn arrange(&mut self, cx: &mut LayoutCx, _bounds: Rect, content: Rect) {
@@ -388,19 +406,40 @@ impl<S: 'static> Widget<S> for TextInput<S> {
         self.scroll_to_caret();
     }
 
+    fn animate(&mut self, cx: &mut PaintCx) {
+        let motion = &cx.theme().motion;
+        let (focused, hovered) = (cx.is_focused(), cx.is_hovered());
+        drive(&mut self.hover, cx, hovered, motion.hover, motion.easing);
+        drive(&mut self.focus, cx, focused, motion.focus, motion.easing);
+    }
+
     fn paint(&mut self, cx: &mut PaintCx, p: &mut dyn Painter) {
-        let t = cx.theme();
+        let theme = cx.theme();
+        let look = &theme.input;
         let (b, c) = (cx.bounds(), cx.content());
         let focused = cx.is_focused();
-        p.fill_rounded_rect(b, t.radius, t.input_background);
-        let (border, width) = if focused {
-            (t.accent, 2.0)
-        } else if cx.is_hovered() {
-            (t.border_hover, 1.0)
-        } else {
-            (t.border, 1.0)
+        let now = cx.now();
+        let (hover, focus) = (self.hover.value(now), self.focus.value(now));
+        let radius = theme.radius.control;
+
+        // 焦点光晕画在外面，随焦点程度渐显；再依次是填充和边框。
+        let glow = Shadow {
+            color: look.focus_glow.color.fade(focus),
+            ..look.focus_glow
         };
-        p.stroke_rect(b, t.radius, width, border);
+        p.draw_shadow(b, radius, &glow);
+        p.fill_rounded_rect(
+            b,
+            radius,
+            look.fill.mix(look.fill_hover, hover).mix(look.fill_focus, focus),
+        );
+        let border = look.border.mix(look.border_hover, hover).mix(look.border_focus, focus);
+        let width = if focused {
+            look.border_focus_width
+        } else {
+            look.border_width
+        };
+        p.stroke_rect(b, radius, width, border);
 
         let (Some(display), Some(hint)) = (&self.display, &self.hint) else {
             return;
@@ -409,24 +448,24 @@ impl<S: 'static> Widget<S> for TextInput<S> {
         let px = p.scale().round().max(1.0) / p.scale();
         p.push_clip(c);
         if display.text().is_empty() {
-            p.draw_text(hint, Point::new(c.x, origin.y), t.text_muted);
+            p.draw_text(hint, Point::new(c.x, origin.y), look.placeholder);
         } else {
             if focused && self.preedit.is_none() && self.edit.has_selection() {
                 for r in display.selection_rects(self.edit.selection()) {
-                    p.fill_rect(r.translate(origin), t.selection);
+                    p.fill_rect(r.translate(origin), look.selection);
                 }
             }
-            p.draw_text(display, origin, t.text);
+            p.draw_text(display, origin, look.text);
             if let Some(pe) = &self.preedit {
                 // 预编辑文本画下划线；输入法正在转换的子句用粗下划线。
                 let start = self.edit.cursor();
                 let y = origin.y + display.first_baseline() + 2.0 * px.max(1.0);
                 for r in display.selection_rects(start..start + pe.text.len()) {
-                    p.fill_rect(Rect::new(origin.x + r.x, y, r.width, px), t.text);
+                    p.fill_rect(Rect::new(origin.x + r.x, y, r.width, px), look.preedit);
                 }
                 if let Some((a, z)) = pe.cursor.filter(|(a, z)| a < z) {
                     for r in display.selection_rects(start + a..start + z.min(pe.text.len())) {
-                        p.fill_rect(Rect::new(origin.x + r.x, y, r.width, 2.0 * px), t.text);
+                        p.fill_rect(Rect::new(origin.x + r.x, y, r.width, 2.0 * px), look.preedit);
                     }
                 }
             }
@@ -436,7 +475,7 @@ impl<S: 'static> Widget<S> for TextInput<S> {
             && self.caret_on
             && let Some(caret) = self.caret_rect(c, p.scale())
         {
-            p.fill_rect(caret, t.text);
+            p.fill_rect(caret, look.caret);
         }
         p.pop_clip();
     }
@@ -471,7 +510,7 @@ impl<S: 'static> Widget<S> for TextInput<S> {
                     if let Some(r) = self.caret_rect(cx.content(), cx.scale()) {
                         cx.request_paint_rect(r.inflate(1.0, 1.0));
                     }
-                    cx.request_timer(Instant::now() + interval);
+                    cx.request_timer(cx.now() + interval);
                 }
             }
             Event::PointerDown {

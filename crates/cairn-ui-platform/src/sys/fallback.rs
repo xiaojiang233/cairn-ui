@@ -30,6 +30,10 @@ pub(crate) fn double_click_distance() -> f64 {
     4.0
 }
 
+pub(crate) fn reduce_motion() -> bool {
+    false // TODO: GNOME org.gnome.desktop.interface enable-animations / macOS reduceMotion
+}
+
 pub(crate) fn font_dirs() -> Vec<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let mut dirs = Vec::new();

@@ -37,6 +37,18 @@ impl Insets {
         left: 0.0,
     };
 
+    /// 占位值：“由控件按主题决定”。上层在布局前把它换成具体数值，不会传给布局引擎。
+    pub const AUTO: Insets = Insets {
+        top: f32::NAN,
+        right: f32::NAN,
+        bottom: f32::NAN,
+        left: f32::NAN,
+    };
+
+    pub fn is_auto(&self) -> bool {
+        self.top.is_nan() || self.right.is_nan() || self.bottom.is_nan() || self.left.is_nan()
+    }
+
     /// 按 CSS 的顺序：上、右、下、左。
     pub const fn new(top: f32, right: f32, bottom: f32, left: f32) -> Self {
         Insets {

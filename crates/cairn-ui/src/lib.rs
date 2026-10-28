@@ -47,6 +47,7 @@
 //! 所有对外接口用逻辑像素。渲染按物理像素进行：矩形边缘对齐到像素网格，文字按
 //! “逻辑字号 × 缩放因子”光栅化。窗口移到缩放不同的显示器上时自动按新缩放重画。
 
+mod anim;
 mod app;
 mod damage;
 mod element;
@@ -60,25 +61,34 @@ mod widgets;
 
 pub mod testing;
 
+pub use anim::{Easing, Transition};
 pub use app::{App, Proxy, ViewFn};
 pub use element::{El, Styled, View};
-pub use theme::Theme;
+pub use theme::{
+    ButtonStyle, FocusRing, IconButtonStyle, InputStyle, Motion, PanelStyle, Radii, SliderStyle, Spacing, Theme,
+    TypeStyle, Typography,
+};
 pub use tree::WidgetId;
 pub use widget::{Change, Event, EventCx, LayoutCx, PaintCx, Role, Semantics, Widget};
-pub use widgets::{Button, Flex, Label, TextInput, button, column, label, row, text_input};
+pub use widgets::{
+    Button, Flex, Icon, IconButton, Label, Panel, Slider, TextInput, TextRole, button, column, icon_button, label,
+    paint_icon, panel, row, slider, text_input,
+};
 
 pub use cairn_ui_layout::{Align, AvailableSpace, Direction, Insets, Justify, Length, MeasureInput, Style};
 pub use cairn_ui_platform::{
     CursorIcon, ImeEvent, Key, KeyEvent, Modifiers, NamedKey, PixelRect, PointerButton, ScrollDelta,
 };
 pub use cairn_ui_render::{
-    Canvas, Color, DeviceRect, FontFamily, FontSetup, Painter, Point, Rect, Size, TextLayout, TextStyle, TextSystem,
+    Affine, BackdropStyle, Background, Brush, Canvas, Color, DeviceRect, FontFamily, FontSetup, GradientStop, Image,
+    ImageScene, NightScene, Painter, Point, Rect, Scene, Shadow, Size, Spot, TextLayout, TextStyle, TextSystem,
 };
 
 /// 常用导入：`use cairn_ui::prelude::*;`
 pub mod prelude {
     pub use crate::{
-        Align, App, Color, El, Insets, Justify, Proxy, Styled, Theme, View, button, column, label, row, text_input,
+        Align, App, Color, El, Icon, Insets, Justify, Proxy, Styled, Theme, View, button, column, icon_button, label,
+        panel, row, slider, text_input,
     };
 }
 

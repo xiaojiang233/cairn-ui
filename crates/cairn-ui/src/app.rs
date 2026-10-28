@@ -8,7 +8,7 @@ use cairn_ui_platform::{self as platform, Context, Handler, PixelRect, Surface, 
 use crate::element::{El, View};
 use crate::host::PlatformHost;
 use crate::theme::Theme;
-use crate::ui::{Ui, Update, ViewBox};
+use crate::ui::{Clock, Ui, Update, ViewBox};
 use crate::{Error, FontSetup, Result, TextSystem};
 
 /// “从状态生成界面”的函数，通常直接传 `Self::view` 这样的方法。
@@ -112,6 +112,7 @@ impl<S: 'static> App<S> {
         self
     }
 
+    /// 外观，默认 [`Theme::light`]。用户在系统里关闭了动画时，主题里的过渡时长在启动时被清零。
     pub fn theme(mut self, theme: Theme) -> Self {
         self.theme = theme;
         self
@@ -183,13 +184,18 @@ impl<S: 'static> Handler for AppHandler<S> {
             inner: cx.proxy(),
             _state: PhantomData,
         });
+        let mut theme = p.theme;
+        if platform::reduce_motion() {
+            theme.motion = theme.motion.reduced();
+        }
         let mut ui = Ui::new(
             state,
             p.view,
-            p.theme,
+            theme,
             text,
             cx.scale_factor() as f32,
             cx.physical_size(),
+            Clock::Real,
         );
         ui.after(&mut PlatformHost(cx));
         self.ui = Some(ui);
@@ -208,7 +214,7 @@ impl<S: 'static> Handler for AppHandler<S> {
             let scale = ui.scale();
             ui.set_size(w, h, scale);
         }
-        let regions = ui.render();
+        let regions = ui.render(&mut PlatformHost(cx));
         let damage: Vec<PixelRect> = regions
             .iter()
             .map(|r| PixelRect {

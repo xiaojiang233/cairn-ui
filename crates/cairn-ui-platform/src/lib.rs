@@ -155,6 +155,17 @@ impl Context<'_> {
         self.window.request_redraw();
     }
 
+    /// 窗口所在显示器的刷新间隔，用来给动画定帧率。查不到时按 60 Hz。
+    pub fn frame_interval(&self) -> Duration {
+        let mhz = self
+            .window
+            .current_monitor()
+            .and_then(|m| m.refresh_rate_millihertz())
+            .filter(|&m| m >= 20_000)
+            .unwrap_or(60_000);
+        Duration::from_nanos(1_000_000_000_000 / mhz as u64)
+    }
+
     pub fn set_cursor(&mut self, icon: CursorIcon) {
         if self.shared.cursor != icon {
             self.shared.cursor = icon;
@@ -249,6 +260,12 @@ pub fn double_click_interval() -> Duration {
 /// 双击判定的最大移动距离（物理像素）。
 pub fn double_click_distance() -> f64 {
     sys::double_click_distance()
+}
+
+/// 用户在系统里关闭了界面动画（Windows：设置 → 辅助功能 → 视觉效果 → 动画效果）。
+/// 上层应据此把过渡动画的时长设为 0。只在调用时读取一次，不跟踪之后的变化。
+pub fn reduce_motion() -> bool {
+    sys::reduce_motion()
 }
 
 /// 创建窗口并运行事件循环，直到 [`Context::exit`] 被调用。必须在主线程调用。

@@ -1,6 +1,6 @@
 //! 运行时需要的宿主服务。真实窗口由平台层提供，测试时用记录型的假实现。
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cairn_ui_platform::{Context, CursorIcon, PixelRect};
 
@@ -12,6 +12,8 @@ pub(crate) trait Host {
     fn set_ime_cursor_area(&mut self, area: PixelRect);
     fn request_redraw(&mut self);
     fn set_wakeup(&mut self, at: Option<Instant>);
+    /// 动画帧间隔（显示器刷新间隔）。
+    fn frame_interval(&self) -> Duration;
     fn exit(&mut self);
 }
 
@@ -40,10 +42,16 @@ impl Host for PlatformHost<'_, '_> {
     fn set_wakeup(&mut self, at: Option<Instant>) {
         self.0.set_wakeup(at);
     }
+    fn frame_interval(&self) -> Duration {
+        self.0.frame_interval()
+    }
     fn exit(&mut self) {
         self.0.exit();
     }
 }
+
+/// 测试里假定的显示器刷新间隔（60 Hz）。
+pub(crate) const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
 
 /// 不连窗口的宿主：把请求记下来，供测试检查。
 #[derive(Debug, Default)]
@@ -81,6 +89,9 @@ impl Host for RecordingHost {
     }
     fn set_wakeup(&mut self, at: Option<Instant>) {
         self.wakeup = at;
+    }
+    fn frame_interval(&self) -> Duration {
+        FRAME_INTERVAL
     }
     fn exit(&mut self) {
         self.exit_requested = true;

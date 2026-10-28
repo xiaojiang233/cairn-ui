@@ -1,0 +1,12 @@
+[package]
+name = "glass_card"
+description = "cairn-ui 演示：Nocturne Glass 夜色玻璃面板"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+cairn-ui = { workspace = true }

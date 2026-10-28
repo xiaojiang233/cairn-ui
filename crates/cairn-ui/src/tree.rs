@@ -7,6 +7,7 @@ use slotmap::SlotMap;
 
 use crate::damage::Damage;
 use crate::element::El;
+use crate::theme::Theme;
 use crate::widget::{AnyWidget, Change, LayoutCx, PaintCx, Widget};
 use crate::{Painter, Point, Rect, Size};
 
@@ -36,6 +37,11 @@ pub(crate) struct Node<S: 'static> {
 }
 
 impl<S: 'static> Node<S> {
+    /// 可能画到的范围（含阴影、外发光等），用于脏区。
+    pub fn visual(&self, theme: &Theme) -> Rect {
+        self.widget.visual_bounds(self.bounds, theme)
+    }
+
     pub fn content(&self) -> Rect {
         let p = &self.padding;
         Rect::new(
@@ -115,13 +121,14 @@ impl<S: 'static> Tree<S> {
         self.reconcile_children(cx, root, vec![el], damage);
     }
 
-    fn build(&mut self, el: El<S>, parent: WidgetId) -> WidgetId {
+    fn build(&mut self, cx: &mut LayoutCx, el: El<S>, parent: WidgetId) -> WidgetId {
         let El {
             widget,
-            style,
+            mut style,
             children,
             key,
         } = el;
+        resolve_style(&*widget, &mut style, cx.theme);
         let layout = &mut self.layout;
         let id = self.nodes.insert_with_key(|id| Node {
             widget,
@@ -134,7 +141,7 @@ impl<S: 'static> Tree<S> {
             padding: Insets::ZERO,
             laid_out: false,
         });
-        let child_ids: Vec<WidgetId> = children.into_iter().map(|c| self.build(c, id)).collect();
+        let child_ids: Vec<WidgetId> = children.into_iter().map(|c| self.build(cx, c, id)).collect();
         let layout_children: Vec<NodeId> = child_ids.iter().map(|c| self.nodes[*c].layout).collect();
         self.layout.set_children(self.nodes[id].layout, &layout_children);
         self.nodes[id].children = child_ids;
@@ -148,10 +155,11 @@ impl<S: 'static> Tree<S> {
     fn update(&mut self, cx: &mut LayoutCx, id: WidgetId, el: El<S>, damage: &mut Damage) -> Result<(), El<S>> {
         let El {
             widget,
-            style,
+            mut style,
             children,
             key,
         } = el;
+        resolve_style(&*widget, &mut style, cx.theme);
         let node = &mut self.nodes[id];
         let change = match node.widget.update_any(cx, widget) {
             Ok(change) => change,
@@ -169,7 +177,7 @@ impl<S: 'static> Tree<S> {
             self.needs_layout = true;
         }
         if change.paint && node.laid_out {
-            damage.add(node.bounds);
+            damage.add(node.visual(cx.theme));
         }
         if node.style != style {
             self.layout.set_style(node.layout, &style);
@@ -205,16 +213,16 @@ impl<S: 'static> Tree<S> {
                 Some(old_id) => match self.update(cx, old_id, el, damage) {
                     Ok(()) => old_id,
                     Err(el) => {
-                        self.remove_subtree(old_id, damage);
-                        self.build(el, parent)
+                        self.remove_subtree(cx.theme, old_id, damage);
+                        self.build(cx, el, parent)
                     }
                 },
-                None => self.build(el, parent),
+                None => self.build(cx, el, parent),
             };
             result.push(id);
         }
         for id in keyed.into_values().chain(unkeyed) {
-            self.remove_subtree(id, damage);
+            self.remove_subtree(cx.theme, id, damage);
         }
         if result != old {
             let layout_children: Vec<NodeId> = result.iter().map(|c| self.nodes[*c].layout).collect();
@@ -224,15 +232,15 @@ impl<S: 'static> Tree<S> {
         self.nodes[parent].children = result;
     }
 
-    fn remove_subtree(&mut self, id: WidgetId, damage: &mut Damage) {
+    fn remove_subtree(&mut self, theme: &Theme, id: WidgetId, damage: &mut Damage) {
         let Some(node) = self.nodes.remove(id) else { return };
         if node.laid_out {
-            damage.add(node.bounds);
+            damage.add(node.visual(theme));
         }
         self.layout.remove(node.layout);
         self.removed.push(id);
         for c in node.children {
-            self.remove_subtree(c, damage);
+            self.remove_subtree(theme, c, damage);
         }
         self.needs_layout = true;
     }
@@ -267,11 +275,11 @@ impl<S: 'static> Tree<S> {
         let bounds = Rect::new(origin.x + l.x, origin.y + l.y, l.width, l.height);
         if !node.laid_out || bounds != node.bounds {
             if node.laid_out {
-                damage.add(node.bounds);
+                damage.add(node.visual(cx.theme));
             }
-            damage.add(bounds);
             node.bounds = bounds;
             node.laid_out = true;
+            damage.add(node.visual(cx.theme));
         }
         node.padding = l.padding;
         let content = node.content();
@@ -283,22 +291,25 @@ impl<S: 'static> Tree<S> {
     }
 
     /// 包含 `p` 的最深层节点（后画的在上面，优先命中）。
-    pub fn hit_test(&self, p: Point) -> Option<WidgetId> {
-        self.hit(self.root, p)
+    pub fn hit_test(&self, p: Point, theme: &Theme) -> Option<WidgetId> {
+        self.hit(self.root, p, theme)
     }
 
-    fn hit(&self, id: WidgetId, p: Point) -> Option<WidgetId> {
+    fn hit(&self, id: WidgetId, p: Point, theme: &Theme) -> Option<WidgetId> {
         let node = &self.nodes[id];
         if node.style.hidden {
             return None;
         }
-        // 子节点可能超出父节点（没有裁剪），所以不先判断父节点是否包含 p。
-        for &c in node.children.iter().rev() {
-            if let Some(hit) = self.hit(c, p) {
-                return Some(hit);
+        let inside = id == self.root || node.bounds.contains(p);
+        // 子节点可能超出父节点，所以不裁剪子元素的控件不先判断父节点是否包含 p。
+        if inside || node.widget.clip_children(theme).is_none() {
+            for &c in node.children.iter().rev() {
+                if let Some(hit) = self.hit(c, p, theme) {
+                    return Some(hit);
+                }
             }
         }
-        (id == self.root || node.bounds.contains(p)).then_some(id)
+        inside.then_some(id)
     }
 
     /// 从 `id` 到根节点的路径（含两端）。
@@ -312,7 +323,7 @@ impl<S: 'static> Tree<S> {
         path
     }
 
-    /// 深度优先（先父后子）的节点顺序，即绘制顺序与 Tab 顺序。隐藏的子树被跳过。
+    /// 深度优先（先父后子）的节点顺序，即 Tab 顺序。隐藏的子树被跳过。
     pub fn visible_in_order(&self) -> Vec<WidgetId> {
         let mut out = Vec::new();
         let mut stack = vec![self.root];
@@ -325,5 +336,25 @@ impl<S: 'static> Tree<S> {
             stack.extend(node.children.iter().rev());
         }
         out
+    }
+}
+
+/// 让控件按主题补全样式里的占位值，剩下的占位值按 0 处理（不能把 NaN 交给布局引擎）。
+fn resolve_style<S: 'static>(widget: &dyn AnyWidget<S>, style: &mut Style, theme: &Theme) {
+    widget.resolve_style(style, theme);
+    for v in [
+        &mut style.padding.top,
+        &mut style.padding.right,
+        &mut style.padding.bottom,
+        &mut style.padding.left,
+        &mut style.margin.top,
+        &mut style.margin.right,
+        &mut style.margin.bottom,
+        &mut style.margin.left,
+        &mut style.gap,
+    ] {
+        if v.is_nan() {
+            *v = 0.0;
+        }
     }
 }

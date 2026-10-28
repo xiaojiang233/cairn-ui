@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use crate::host::Host;
 use crate::theme::Theme;
 use crate::{
-    CursorIcon, ImeEvent, KeyEvent, Modifiers, Painter, Point, PointerButton, Rect, ScrollDelta, Size, TextSystem,
+    Affine, CursorIcon, ImeEvent, KeyEvent, Modifiers, Painter, Point, PointerButton, Rect, ScrollDelta, Size, Style,
+    TextSystem,
 };
 use cairn_ui_layout::MeasureInput;
 
@@ -60,8 +61,9 @@ impl std::ops::BitOrAssign for Change {
 /// 分发给控件的事件。坐标是逻辑像素、窗口坐标系。
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
-    /// 指针移入 / 移出本控件（只发给最深层的那个控件）。框架不会因此自动重绘，
-    /// 有悬停效果的控件应在这里调用 [`EventCx::request_paint`]。
+    /// 指针进入 / 离开本控件或它的任何子元素（与 DOM 的 `mouseenter` / `mouseleave` 相同：
+    /// 指针从父控件移到子控件上时，父控件**不会**收到 `PointerLeave`）。
+    /// 框架不会因此自动重绘，有悬停效果的控件应在这里调用 [`EventCx::request_paint`]。
     PointerEnter,
     PointerLeave,
     PointerMove {
@@ -99,6 +101,7 @@ pub enum Role {
     Label,
     Button,
     TextInput,
+    Slider,
 }
 
 /// 控件的语义信息，用于以后接入无障碍接口，也方便测试里按文字查找控件。
@@ -107,7 +110,7 @@ pub struct Semantics {
     pub role: Role,
     /// 名称：按钮文字、标签文字、输入框的占位提示等。
     pub label: Option<String>,
-    /// 值：输入框的内容等。
+    /// 值：输入框的内容、滑块的数值等。
     pub value: Option<String>,
     pub disabled: bool,
 }
@@ -117,11 +120,15 @@ pub struct Semantics {
 /// 同一个控件实例在多次 `view` 调用之间一直存在（由 [`crate::WidgetId`] 标识）；
 /// 每次重新构建界面时，新生成的同类型描述通过 [`Widget::update`] 合并进来。
 pub trait Widget<S: 'static>: Any {
-    /// 用新的描述更新自己：拷贝外部给定的属性，保留内部状态（悬停、光标位置、排版缓存等），
+    /// 用新的描述更新自己：拷贝外部给定的属性，保留内部状态（悬停、动画、光标位置、排版缓存等），
     /// 并报告需要重新布局还是只需重绘。
     fn update(&mut self, cx: &mut LayoutCx, new: Self) -> Change
     where
         Self: Sized;
+
+    /// 布局前按主题补全样式里的占位值，例如内边距是 [`crate::Insets::AUTO`] 时换成主题给的默认值。
+    /// 剩下没补的占位值按 0 处理。
+    fn resolve_style(&self, _style: &mut Style, _theme: &Theme) {}
 
     /// 测量内容尺寸（不含内边距）。只对没有子元素的控件调用。
     fn measure(&mut self, _cx: &mut LayoutCx, _input: &MeasureInput) -> Size {
@@ -131,7 +138,36 @@ pub trait Widget<S: 'static>: Any {
     /// 每次布局完成后调用，告知最终的边框盒与内容区（窗口坐标）。
     fn arrange(&mut self, _cx: &mut LayoutCx, _bounds: Rect, _content: Rect) {}
 
+    /// 本控件在任何状态下可能画到的范围（窗口坐标）：阴影、外发光、焦点框、悬停上浮都要算进去。
+    /// 用于计算脏区和跳过画不到的控件。默认是边框盒（框架另外留了 4 像素余量给抗锯齿和焦点框）。
+    fn visual_bounds(&self, bounds: Rect, _theme: &Theme) -> Rect {
+        bounds
+    }
+
+    /// 绘制之前调用，先于 [`Widget::transform`] 和 [`Widget::paint`]：按 [`PaintCx`] 里的当前状态
+    /// （悬停、按下、焦点……）重设过渡的目标，还在过渡中就 [`PaintCx::request_frame`]。
+    ///
+    /// 过渡的目标不在事件里设，而是在这里按状态推导，所以状态由什么引起都不会漏掉；
+    /// 又因为先于 `transform` 和 `paint`，它们读到的就是本帧最新的过渡值——时长为 0
+    /// （系统关闭了动画）时，状态变化后的第一帧就已经是终态，不会要等下一帧。
+    fn animate(&mut self, _cx: &mut PaintCx) {}
+
+    /// 本控件及其子元素的绘制变换（悬停上浮、按下缩小），默认不变换。只影响绘制，不影响布局和点击判定。
+    /// 只读取 [`Widget::animate`] 已经更新过的过渡值。
+    fn transform(&self, _cx: &PaintCx) -> Affine {
+        Affine::IDENTITY
+    }
+
+    /// 返回 `Some(圆角半径)` 时，子元素被裁剪到本控件的边框盒内（绘制和点击判定都是）。
+    fn clip_children(&self, _theme: &Theme) -> Option<f32> {
+        None
+    }
+
+    /// 画自己（在子元素下面）。
     fn paint(&mut self, cx: &mut PaintCx, painter: &mut dyn Painter);
+
+    /// 子元素画完之后调用，画盖在子元素上面的东西（滚动条等）。
+    fn paint_over(&mut self, _cx: &mut PaintCx, _painter: &mut dyn Painter) {}
 
     fn event(&mut self, _cx: &mut EventCx<S>, _event: &Event) {}
 
@@ -182,12 +218,12 @@ pub struct LayoutCx<'a> {
     pub(crate) theme: &'a Theme,
 }
 
-impl LayoutCx<'_> {
+impl<'a> LayoutCx<'a> {
     pub fn text(&mut self) -> &mut TextSystem {
         self.text
     }
 
-    pub fn theme(&self) -> &Theme {
+    pub fn theme(&self) -> &'a Theme {
         self.theme
     }
 }
@@ -201,9 +237,11 @@ pub struct PaintCx<'a> {
     pub(crate) focus_visible: bool,
     pub(crate) window_focused: bool,
     pub(crate) theme: &'a Theme,
+    pub(crate) now: Instant,
+    pub(crate) frame_requested: bool,
 }
 
-impl PaintCx<'_> {
+impl<'a> PaintCx<'a> {
     /// 边框盒（窗口坐标）。
     pub fn bounds(&self) -> Rect {
         self.bounds
@@ -214,6 +252,7 @@ impl PaintCx<'_> {
         self.content
     }
 
+    /// 指针在本控件或它的子元素上。
     pub fn is_hovered(&self) -> bool {
         self.hovered
     }
@@ -231,8 +270,19 @@ impl PaintCx<'_> {
         self.window_focused
     }
 
-    pub fn theme(&self) -> &Theme {
+    pub fn theme(&self) -> &'a Theme {
         self.theme
+    }
+
+    /// 本帧的时间点，动画按它取值。同一帧里所有控件拿到的是同一个值。
+    pub fn now(&self) -> Instant {
+        self.now
+    }
+
+    /// 动画还没结束：请框架在下一帧（按显示器刷新率）重画本控件。
+    /// 每帧都要重新请求；不再请求时动画帧自然停止，事件循环回到空闲等待。
+    pub fn request_frame(&mut self) {
+        self.frame_requested = true;
     }
 }
 
@@ -260,10 +310,11 @@ pub struct EventCx<'a, S> {
     pub(crate) modifiers: Modifiers,
     pub(crate) scale: f32,
     pub(crate) blink: Option<Duration>,
+    pub(crate) now: Instant,
     pub(crate) out: EventOutput,
 }
 
-impl<S> EventCx<'_, S> {
+impl<'a, S> EventCx<'a, S> {
     /// 访问应用状态，通常用来调用应用传进来的回调。调用后框架会重新构建界面。
     pub fn app(&mut self) -> &mut S {
         self.out.app_touched = true;
@@ -275,7 +326,7 @@ impl<S> EventCx<'_, S> {
         self.out.handled = true;
     }
 
-    /// 本控件需要重绘。
+    /// 本控件需要重绘（重画 [`Widget::visual_bounds`] 范围）。
     pub fn request_paint(&mut self) {
         self.out.change.paint = true;
     }
@@ -323,6 +374,11 @@ impl<S> EventCx<'_, S> {
         self.scale
     }
 
+    /// 当前时间。动画、定时器都应以它为准（测试里是可控的虚拟时钟）。
+    pub fn now(&self) -> Instant {
+        self.now
+    }
+
     /// 系统设置的文本光标闪烁间隔。`None` 表示不闪烁。
     pub fn caret_blink_interval(&self) -> Option<Duration> {
         self.blink
@@ -332,7 +388,7 @@ impl<S> EventCx<'_, S> {
         self.text
     }
 
-    pub fn theme(&self) -> &Theme {
+    pub fn theme(&self) -> &'a Theme {
         self.theme
     }
 

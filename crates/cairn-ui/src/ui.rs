@@ -1,4 +1,4 @@
-//! 运行时核心：持有应用状态与控件树，处理输入、重建界面、布局、按脏区重绘。
+//! 运行时核心：持有应用状态与控件树，处理输入、重建界面、布局、按脏区重绘、驱动动画帧。
 //!
 //! 不直接依赖窗口：平台服务通过 [`Host`] 注入，所以同一套逻辑也能在测试里无窗口运行。
 
@@ -13,13 +13,29 @@ use crate::host::Host;
 use crate::theme::Theme;
 use crate::tree::{Tree, WidgetId};
 use crate::widget::{Event, EventCx, EventOutput, LayoutCx, PaintCx};
-use crate::{Canvas, DeviceRect, Point, Rect, Size, TextSystem};
+use crate::{Background, Canvas, DeviceRect, Painter, Point, Rect, Size, TextSystem};
 
 /// 重绘时脏区外扩的距离（逻辑像素），覆盖抗锯齿边缘和画在控件外面的焦点框。
 const PAINT_MARGIN: f32 = 4.0;
 
 pub(crate) type ViewBox<S> = Box<dyn Fn(&S) -> El<S>>;
 pub(crate) type Update<S> = Box<dyn FnOnce(&mut S) + Send>;
+
+/// 时间来源。真实窗口用系统时钟；测试用手动推进的虚拟时钟，动画结果可以精确复现。
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Clock {
+    Real,
+    Manual(Instant),
+}
+
+impl Clock {
+    pub fn now(&self) -> Instant {
+        match self {
+            Clock::Real => Instant::now(),
+            Clock::Manual(t) => *t,
+        }
+    }
+}
 
 pub(crate) struct Ui<S: 'static> {
     pub state: S,
@@ -31,7 +47,10 @@ pub(crate) struct Ui<S: 'static> {
     phys: (u32, u32),
     pub canvas: Canvas,
     damage: Damage,
+    /// 指针下最深层的控件。
     hovered: Option<WidgetId>,
+    /// 从 `hovered` 到根的路径：这些控件都处于“悬停”状态。
+    hover_path: Vec<WidgetId>,
     captured: Option<WidgetId>,
     pub focused: Option<WidgetId>,
     focus_visible: bool,
@@ -44,10 +63,30 @@ pub(crate) struct Ui<S: 'static> {
     blink: Option<Duration>,
     double_click_time: Duration,
     double_click_distance: f32,
+    pub clock: Clock,
+    /// 上一帧请求了下一帧的控件（动画进行中）。
+    animating: Vec<WidgetId>,
+    /// 下一帧动画的时间点。
+    next_frame: Option<Instant>,
 }
 
 impl<S: 'static> Ui<S> {
-    pub fn new(state: S, view: ViewBox<S>, theme: Theme, text: TextSystem, scale: f32, phys: (u32, u32)) -> Self {
+    pub fn new(
+        state: S,
+        view: ViewBox<S>,
+        theme: Theme,
+        text: TextSystem,
+        scale: f32,
+        phys: (u32, u32),
+        clock: Clock,
+    ) -> Self {
+        let mut canvas = Canvas::new();
+        canvas.set_background(match &theme.scene {
+            Some(scene) => Background::Scene(scene.clone()),
+            None => Background::Solid(theme.background),
+        });
+        canvas.set_backdrop_style(theme.backdrop);
+        canvas.set_noise(theme.noise);
         let mut ui = Ui {
             state,
             view,
@@ -56,9 +95,10 @@ impl<S: 'static> Ui<S> {
             theme,
             scale,
             phys,
-            canvas: Canvas::new(),
+            canvas,
             damage: Damage::default(),
             hovered: None,
+            hover_path: Vec::new(),
             captured: None,
             focused: None,
             focus_visible: false,
@@ -71,6 +111,9 @@ impl<S: 'static> Ui<S> {
             blink: platform::caret_blink_interval(),
             double_click_time: platform::double_click_interval(),
             double_click_distance: platform::double_click_distance() as f32,
+            clock,
+            animating: Vec::new(),
+            next_frame: None,
         };
         ui.tree.set_viewport(ui.logical_size());
         ui.rebuild_view();
@@ -85,6 +128,15 @@ impl<S: 'static> Ui<S> {
 
     pub fn scale(&self) -> f32 {
         self.scale
+    }
+
+    /// 还有动画在进行（下一帧已经排上）。
+    pub fn animating(&self) -> bool {
+        self.next_frame.is_some()
+    }
+
+    pub fn next_frame(&self) -> Option<Instant> {
+        self.next_frame
     }
 
     // ---------------------------------------------------------------- 构建与布局
@@ -111,6 +163,8 @@ impl<S: 'static> Ui<S> {
         if gone(&self.focused) {
             self.focused = None;
         }
+        self.hover_path.retain(|id| !removed.contains(id));
+        self.animating.retain(|id| !removed.contains(id));
         self.timers.retain(|(_, id)| !removed.contains(id));
     }
 
@@ -126,7 +180,7 @@ impl<S: 'static> Ui<S> {
         if let Some(n) = self.tree.nodes.get(id)
             && n.laid_out
         {
-            self.damage.add(n.bounds);
+            self.damage.add(n.visual(&self.theme));
         }
     }
 
@@ -149,6 +203,7 @@ impl<S: 'static> Ui<S> {
             modifiers: self.modifiers,
             scale: self.scale,
             blink: self.blink,
+            now: self.clock.now(),
             out: EventOutput::default(),
         };
         node.widget.event(&mut cx, event);
@@ -158,7 +213,7 @@ impl<S: 'static> Ui<S> {
             self.tree.needs_layout = true;
         }
         if out.change.paint && node.laid_out {
-            self.damage.add(node.bounds);
+            self.damage.add(node.visual(&self.theme));
         }
         for r in out.damage {
             self.damage.add(r);
@@ -230,16 +285,18 @@ impl<S: 'static> Ui<S> {
     }
 
     fn update_hover(&mut self, host: &mut dyn Host) {
-        let new = self.pointer.and_then(|p| self.tree.hit_test(p));
+        let new = self.pointer.and_then(|p| self.tree.hit_test(p, &self.theme));
         if new != self.hovered {
-            let old = std::mem::replace(&mut self.hovered, new);
+            self.hovered = new;
+            let new_path = new.map(|h| self.tree.ancestors(h)).unwrap_or_default();
+            let old_path = std::mem::replace(&mut self.hover_path, new_path.clone());
             // 是否需要重画由控件自己决定（有悬停效果的控件在 Enter / Leave 里请求重绘），
-            // 否则鼠标划过大容器时会整块重画。
-            if let Some(o) = old {
-                self.send(host, o, &Event::PointerLeave);
+            // 否则鼠标划过大容器时会整块重画。离开从里往外发，进入从外往里发。
+            for id in old_path.iter().filter(|id| !new_path.contains(id)) {
+                self.send(host, *id, &Event::PointerLeave);
             }
-            if let Some(n) = new {
-                self.send(host, n, &Event::PointerEnter);
+            for id in new_path.iter().rev().filter(|id| !old_path.contains(id)) {
+                self.send(host, *id, &Event::PointerEnter);
             }
         }
         let icon = self
@@ -260,7 +317,7 @@ impl<S: 'static> Ui<S> {
         let Some(pos) = self.pointer else { return };
         self.layout();
         if pressed {
-            let now = Instant::now();
+            let now = self.clock.now();
             let count = match self.last_click {
                 Some((t, p, c))
                     if now.duration_since(t) <= self.double_click_time
@@ -272,7 +329,7 @@ impl<S: 'static> Ui<S> {
                 _ => 1,
             };
             self.last_click = Some((now, pos, count));
-            let hit = self.tree.hit_test(pos);
+            let hit = self.tree.hit_test(pos, &self.theme);
             // 点到可获得焦点的控件（或其子元素）就把焦点给它，点到别处则清除焦点。
             let focus = hit.and_then(|h| {
                 self.tree
@@ -286,7 +343,7 @@ impl<S: 'static> Ui<S> {
                 self.captured = self.dispatch(host, h, &Event::PointerDown { pos, button, count }, true);
             }
         } else {
-            let target = self.captured.take().or_else(|| self.tree.hit_test(pos));
+            let target = self.captured.take().or_else(|| self.tree.hit_test(pos, &self.theme));
             if let Some(t) = target {
                 self.dispatch(host, t, &Event::PointerUp { pos, button }, true);
             }
@@ -366,7 +423,14 @@ impl<S: 'static> Ui<S> {
         self.damage.add_full();
     }
 
+    /// 定时器或动画帧的时间到了。
     pub fn fire_timers(&mut self, host: &mut dyn Host, now: Instant) {
+        if self.next_frame.is_some_and(|f| f <= now) {
+            self.next_frame = None;
+            for id in std::mem::take(&mut self.animating) {
+                self.damage_node(id);
+            }
+        }
         let due: Vec<WidgetId> = self
             .timers
             .iter()
@@ -403,10 +467,20 @@ impl<S: 'static> Ui<S> {
             }
         }
         self.sync_ime(host);
-        host.set_wakeup(self.timers.iter().map(|(t, _)| *t).min());
+        self.schedule(host);
         if !self.damage.is_empty() {
             host.request_redraw();
         }
+    }
+
+    /// 告诉宿主下一次需要醒来的时间：最近的定时器或下一帧动画。
+    fn schedule(&mut self, host: &mut dyn Host) {
+        let timer = self.timers.iter().map(|(t, _)| *t).min();
+        let wake = match (timer, self.next_frame) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        host.set_wakeup(wake);
     }
 
     fn sync_ime(&mut self, host: &mut dyn Host) {
@@ -434,7 +508,8 @@ impl<S: 'static> Ui<S> {
     // ---------------------------------------------------------------- 绘制
 
     /// 重画所有脏区，返回本帧更新过的区域（物理像素）。没有脏区时返回空列表。
-    pub fn render(&mut self) -> Vec<DeviceRect> {
+    /// 画的过程中有控件请求了下一帧，就按显示器刷新间隔排上。
+    pub fn render(&mut self, host: &mut dyn Host) -> Vec<DeviceRect> {
         let (w, h) = self.phys;
         if w == 0 || h == 0 {
             return Vec::new();
@@ -453,13 +528,18 @@ impl<S: 'static> Ui<S> {
         } else {
             damage::to_device(&set.rects, self.scale, PAINT_MARGIN, bounds)
         };
+        let now = self.clock.now();
         for region in &regions {
-            self.paint_region(*region);
+            self.paint_region(*region, now);
         }
+        if !self.animating.is_empty() && self.next_frame.is_none() {
+            self.next_frame = Some(now + host.frame_interval());
+        }
+        self.schedule(host);
         regions
     }
 
-    fn paint_region(&mut self, region: DeviceRect) {
+    fn paint_region(&mut self, region: DeviceRect, now: Instant) {
         let s = self.scale;
         let area = Rect::new(
             region.x as f32 / s,
@@ -467,36 +547,103 @@ impl<S: 'static> Ui<S> {
             region.width as f32 / s,
             region.height as f32 / s,
         );
-        let order = self.tree.visible_in_order();
         let Ui {
             canvas,
             text,
             tree,
             theme,
-            hovered,
+            hover_path,
             focused,
             focus_visible,
             window_focused,
+            animating,
             ..
         } = self;
+        let mut st = PaintState {
+            tree,
+            theme,
+            hover_path,
+            focused: *focused,
+            focus_visible: *focus_visible,
+            window_focused: *window_focused,
+            now,
+            area,
+            animating,
+        };
         canvas.paint_region(region, s, text, |p| {
-            p.fill_rect(area.inflate(1.0, 1.0), theme.background);
-            for id in order {
-                let node = &mut tree.nodes[id];
-                if !node.laid_out || !node.bounds.inflate(PAINT_MARGIN, PAINT_MARGIN).intersects(&area) {
-                    continue;
-                }
-                let mut cx = PaintCx {
-                    bounds: node.bounds,
-                    content: node.content(),
-                    hovered: *hovered == Some(id),
-                    focused: *focused == Some(id),
-                    focus_visible: *focus_visible,
-                    window_focused: *window_focused,
-                    theme,
-                };
-                node.widget.paint(&mut cx, p);
-            }
+            let root = st.tree.root;
+            paint_node(&mut st, root, p);
         });
+    }
+}
+
+struct PaintState<'a, S: 'static> {
+    tree: &'a mut Tree<S>,
+    theme: &'a Theme,
+    hover_path: &'a [WidgetId],
+    focused: Option<WidgetId>,
+    focus_visible: bool,
+    window_focused: bool,
+    now: Instant,
+    /// 本次重画的区域（逻辑像素）。
+    area: Rect,
+    animating: &'a mut Vec<WidgetId>,
+}
+
+/// 按树的结构递归绘制：变换、裁剪作用于整棵子树。
+fn paint_node<S: 'static>(st: &mut PaintState<S>, id: WidgetId, p: &mut dyn Painter) {
+    let theme = st.theme;
+    let node = &mut st.tree.nodes[id];
+    if node.style.hidden {
+        return;
+    }
+    let visible = node.laid_out
+        && node
+            .visual(theme)
+            .inflate(PAINT_MARGIN, PAINT_MARGIN)
+            .intersects(&st.area);
+    let mut cx = PaintCx {
+        bounds: node.bounds,
+        content: node.content(),
+        hovered: st.hover_path.contains(&id),
+        focused: st.focused == Some(id),
+        focus_visible: st.focus_visible,
+        window_focused: st.window_focused,
+        theme,
+        now: st.now,
+        frame_requested: false,
+    };
+    node.widget.animate(&mut cx);
+    let transform = node.widget.transform(&cx);
+    let transformed = !transform.is_identity();
+    if transformed {
+        p.push_transform(transform);
+    }
+    if visible {
+        node.widget.paint(&mut cx, p);
+    }
+    let clip = node.widget.clip_children(theme);
+    let bounds = node.bounds;
+    // 裁剪子元素的控件本身不在重画区域内时，子元素也不可能在。
+    if clip.is_none() || visible {
+        if let Some(radius) = clip {
+            p.push_rounded_clip(bounds, radius);
+        }
+        for i in 0..st.tree.nodes[id].children.len() {
+            let child = st.tree.nodes[id].children[i];
+            paint_node(st, child, p);
+        }
+        if clip.is_some() {
+            p.pop_clip();
+        }
+    }
+    if visible {
+        st.tree.nodes[id].widget.paint_over(&mut cx, p);
+    }
+    if transformed {
+        p.pop_transform();
+    }
+    if cx.frame_requested && !st.animating.contains(&id) {
+        st.animating.push(id);
     }
 }

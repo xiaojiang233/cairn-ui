@@ -40,9 +40,29 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# 渲染层的逐像素循环（背景模糊、阴影、噪点、混合）在未优化的 debug 构建里要慢约 10 倍，
+# 动画会卡顿。依赖和渲染层在 dev 下也优化，自己的其余代码保持 debug 方便调试。
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.cairn-ui-render]
+opt-level = 2
+
 [profile.release]
 opt-level = "z"
 lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# 整体按体积优化（opt-level = "z"）会让 CPU 渲染的逐像素循环慢约 4 倍：悬停动画一帧（1.5 倍缩放、
+# 27 万像素）实测 22 ms，超出 60 Hz 的 16.7 ms 预算。只把渲染热点（tiny-skia 的光栅管线和
+# cairn-ui-render 的模糊 / 阴影 / 噪点循环）提到 opt-level = 2：一帧约 6 ms，exe 增大约 95 KiB。
+[profile.release.package.tiny-skia]
+opt-level = 2
+
+[profile.release.package.tiny-skia-path]
+opt-level = 2
+
+[profile.release.package.cairn-ui-render]
+opt-level = 2

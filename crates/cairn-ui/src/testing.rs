@@ -4,15 +4,15 @@
 //! 只是平台服务换成了记录型的假实现：输入法开关、候选框位置、剪贴板等都可以直接读出来检查。
 //! 字体用的是系统字体（与真实运行一致），所以结果依赖当前系统安装的字体。
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cairn_ui_platform::{self as platform, ImeEvent, Key, KeyEvent, Modifiers, PixelRect, PointerButton};
 
 use crate::app::{ViewFn, erase_view, system_fonts};
-use crate::host::RecordingHost;
+use crate::host::{FRAME_INTERVAL, RecordingHost};
 use crate::theme::Theme;
 use crate::tree::WidgetId;
-use crate::ui::Ui;
+use crate::ui::{Clock, Ui};
 use crate::widget::{Role, Semantics};
 use crate::{DeviceRect, Point, Rect, TextSystem};
 
@@ -32,6 +32,9 @@ pub struct NodeInfo {
 }
 
 /// 无窗口运行的界面。
+///
+/// 时间是虚拟的：从创建时刻开始，只有 [`Headless::advance`]、[`Headless::fire_timers`]
+/// 会推进它，所以动画的中间状态可以精确复现。动画帧间隔按 60 Hz 计。
 pub struct Headless<S: 'static> {
     ui: Ui<S>,
     host: RecordingHost,
@@ -51,8 +54,17 @@ impl<S: 'static> Headless<S> {
     where
         F: for<'a> ViewFn<'a, S>,
     {
+        Self::with_theme(state, view, width, height, scale, Theme::default(), text)
+    }
+
+    /// 指定主题。
+    pub fn with_theme<F>(state: S, view: F, width: f32, height: f32, scale: f32, theme: Theme, text: TextSystem) -> Self
+    where
+        F: for<'a> ViewFn<'a, S>,
+    {
         let phys = ((width * scale).round() as u32, (height * scale).round() as u32);
-        let mut ui = Ui::new(state, erase_view(view), Theme::default(), text, scale, phys);
+        let clock = Clock::Manual(Instant::now());
+        let mut ui = Ui::new(state, erase_view(view), theme, text, scale, phys, clock);
         let mut host = RecordingHost::default();
         ui.after(&mut host);
         Headless { ui, host }
@@ -76,7 +88,34 @@ impl<S: 'static> Headless<S> {
     /// 重画脏区，返回本帧更新的区域（物理像素）。
     pub fn render(&mut self) -> Vec<DeviceRect> {
         self.host.redraw_requested = false;
-        self.ui.render()
+        self.ui.render(&mut self.host)
+    }
+
+    /// 虚拟时钟的当前时间。
+    pub fn now(&self) -> Instant {
+        self.ui.clock.now()
+    }
+
+    /// 把虚拟时钟往前拨 `d`，触发期间到期的定时器和动画帧（不自动重画）。
+    pub fn advance(&mut self, d: Duration) {
+        let now = self.now() + d;
+        self.fire_timers(now);
+    }
+
+    /// 还有动画在进行（已经排上了下一帧）。
+    pub fn animating(&self) -> bool {
+        self.ui.animating()
+    }
+
+    /// 一帧一帧推进并重画，直到动画全部结束（最多 `max_frames` 帧）。返回每帧重画的区域。
+    pub fn run_animations(&mut self, max_frames: usize) -> Vec<Vec<DeviceRect>> {
+        let mut frames = Vec::new();
+        while frames.len() < max_frames {
+            let Some(at) = self.ui.next_frame() else { break };
+            self.fire_timers(at.max(self.now()));
+            frames.push(self.render());
+        }
+        frames
     }
 
     /// 画布像素：RGBA8，`width() * height()` 个。
@@ -102,7 +141,7 @@ impl<S: 'static> Headless<S> {
         self.host.redraw_requested
     }
 
-    /// 所有可见节点，按绘制顺序。
+    /// 所有可见节点，按 Tab 顺序（深度优先，先父后子）。
     pub fn nodes(&self) -> Vec<NodeInfo> {
         let tree = &self.ui.tree;
         tree.visible_in_order()
@@ -207,8 +246,16 @@ impl<S: 'static> Headless<S> {
         self.host.wakeup
     }
 
+    /// 把虚拟时钟拨到 `now`（不会往回拨），触发到期的定时器和动画帧。
     pub fn fire_timers(&mut self, now: Instant) {
+        let now = now.max(self.now());
+        self.ui.clock = Clock::Manual(now);
         self.ui.fire_timers(&mut self.host, now);
+    }
+
+    /// 动画帧间隔（60 Hz）。
+    pub fn frame_interval(&self) -> Duration {
+        FRAME_INTERVAL
     }
 
     pub fn set_window_focused(&mut self, focused: bool) {

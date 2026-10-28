@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>Cairn mark</title>
+  <!-- Three glass stones in moonlight blue; the top one is the champagne-gold summit marker. -->
+  <defs>
+    <linearGradient id="cm-b" x1=".65" y1="0" x2=".35" y2="1">
+      <stop offset="0" stop-color="#6487B5"/>
+      <stop offset="1" stop-color="#33517A"/>
+    </linearGradient>
+    <linearGradient id="cm-m" x1=".65" y1="0" x2=".35" y2="1">
+      <stop offset="0" stop-color="#86A6CC"/>
+      <stop offset="1" stop-color="#416592"/>
+    </linearGradient>
+    <radialGradient id="cm-g" cx=".55" cy=".3" r=".75">
+      <stop offset="0" stop-color="#F3DCA8"/>
+      <stop offset="1" stop-color="#E4B863"/>
+    </radialGradient>
+    <linearGradient id="cm-r" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity=".9"/>
+      <stop offset=".45" stop-color="#fff" stop-opacity="0"/>
+      <stop offset="1" stop-color="#060A13" stop-opacity=".4"/>
+    </linearGradient>
+    <linearGradient id="cm-q" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity=".9"/>
+      <stop offset=".45" stop-color="#fff" stop-opacity="0"/>
+      <stop offset="1" stop-color="#9A6B12" stop-opacity=".45"/>
+    </linearGradient>
+    <linearGradient id="cm-s" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fff" stop-opacity="0"/>
+      <stop offset=".6" stop-color="#fff" stop-opacity=".55"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <g stroke="url(#cm-r)" stroke-width="2">
+    <path fill="url(#cm-b)" d="M23.2 195.3C23.6 173 69.6 157.6 132.7 158.7C190.2 159.7 231.6 176.6 231.2 199C230.8 222.9 205 230 123.7 228.6C46.9 227.2 22.8 219.3 23.2 195.3Z"/>
+    <path fill="url(#cm-m)" d="M61.2 130.2C60.1 111 88.6 95.3 129.1 92.8C174.1 90 207.5 101.9 208.7 121.1C209.9 141.2 191.8 149.3 139 152.6C82.7 156 62.5 150.2 61.2 130.2Z"/>
+    <path fill="url(#cm-g)" stroke="url(#cm-q)" d="M81.7 56.2C83.3 38 103.2 25.4 127.1 27.5C147.7 29.3 162.7 45 161.1 63.1C159.5 81.3 144.6 89.5 117.2 87.1C92.2 84.9 80.1 74.4 81.7 56.2Z"/>
+  </g>
+  <g fill="none" stroke="url(#cm-s)" stroke-width="1.6">
+    <path d="M39.8 200.5C40.1 184.9 78.6 174.2 131.6 175.2C180 176 214.8 187.9 214.6 203.6"/>
+    <path d="M73 133.7C72.2 120.2 96.3 109 130.5 106.9C168.2 104.6 196.1 112.6 196.9 126.1"/>
+    <path d="M88 60.9C89.1 48.2 105.7 39.6 125.7 41.4C143.1 42.9 155.8 54.1 154.7 66.8"/>
+  </g>
+</svg>

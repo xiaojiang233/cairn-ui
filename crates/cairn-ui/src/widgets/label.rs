@@ -3,17 +3,28 @@
 use cairn_ui_layout::{AvailableSpace, MeasureInput};
 
 use crate::element::element;
-use crate::theme::Theme;
+use crate::theme::{Theme, TypeStyle};
 use crate::widget::{Change, LayoutCx, PaintCx, Role, Semantics, Widget};
 use crate::{Color, FontFamily, Painter, Rect, Size, Style, TextLayout, TextStyle};
+
+/// 文字层级，对应主题里 [`crate::Typography`] 的各项。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TextRole {
+    Title,
+    #[default]
+    Body,
+    Secondary,
+    Caption,
+}
 
 /// 一段文字。宽度不够时自动换行。用 [`label`] 创建。
 pub struct Label {
     pub(crate) style: Style,
     pub(crate) key: Option<u64>,
     text: String,
+    role: TextRole,
     font_size: Option<f32>,
-    weight: u16,
+    weight: Option<u16>,
     color: Option<Color>,
     layout: Option<TextLayout>,
     /// 不换行时的宽度。
@@ -25,8 +36,9 @@ pub fn label(text: impl Into<String>) -> Label {
         style: Style::default(),
         key: None,
         text: text.into(),
+        role: TextRole::Body,
         font_size: None,
-        weight: 400,
+        weight: None,
         color: None,
         layout: None,
         natural_width: 0.0,
@@ -36,14 +48,35 @@ pub fn label(text: impl Into<String>) -> Label {
 element!(Label);
 
 impl Label {
-    /// 字号（逻辑像素），默认取主题字号。
+    /// 文字层级，决定默认的字号、字重和颜色。
+    pub fn role(mut self, role: TextRole) -> Self {
+        self.role = role;
+        self
+    }
+
+    /// 标题。
+    pub fn title(self) -> Self {
+        self.role(TextRole::Title)
+    }
+
+    /// 次要说明，例如副标题。
+    pub fn secondary(self) -> Self {
+        self.role(TextRole::Secondary)
+    }
+
+    /// 辅助小字。
+    pub fn caption(self) -> Self {
+        self.role(TextRole::Caption)
+    }
+
+    /// 字号（逻辑像素），覆盖层级给的默认值。
     pub fn font_size(mut self, size: f32) -> Self {
         self.font_size = Some(size);
         self
     }
 
     pub fn weight(mut self, weight: u16) -> Self {
-        self.weight = weight;
+        self.weight = Some(weight);
         self
     }
 
@@ -51,17 +84,33 @@ impl Label {
         self.weight(700)
     }
 
-    /// 文字颜色，默认取主题文字色。
+    /// 文字颜色，覆盖层级给的默认值。
     pub fn color(mut self, color: Color) -> Self {
         self.color = Some(color);
         self
     }
 
+    fn type_style(&self, theme: &Theme) -> TypeStyle {
+        let t = &theme.typography;
+        let base = match self.role {
+            TextRole::Title => t.title,
+            TextRole::Body => t.body,
+            TextRole::Secondary => t.secondary,
+            TextRole::Caption => t.caption,
+        };
+        TypeStyle {
+            size: self.font_size.unwrap_or(base.size),
+            weight: self.weight.unwrap_or(base.weight),
+            color: self.color.unwrap_or(base.color),
+        }
+    }
+
     fn text_style(&self, theme: &Theme) -> TextStyle {
+        let ts = self.type_style(theme);
         TextStyle {
-            font_size: self.font_size.unwrap_or(theme.font_size),
-            line_height: theme.line_height,
-            weight: self.weight,
+            font_size: ts.size,
+            line_height: theme.typography.line_height,
+            weight: ts.weight,
             family: FontFamily::SansSerif,
         }
     }
@@ -97,13 +146,18 @@ impl Label {
 impl<S: 'static> Widget<S> for Label {
     fn update(&mut self, _cx: &mut LayoutCx, new: Self) -> Change {
         let mut change = Change::NONE;
-        if new.text != self.text || new.font_size != self.font_size || new.weight != self.weight {
+        if new.text != self.text
+            || new.role != self.role
+            || new.font_size != self.font_size
+            || new.weight != self.weight
+        {
             change = Change::LAYOUT;
         }
         if new.color != self.color {
             change |= Change::PAINT;
         }
         self.text = new.text;
+        self.role = new.role;
         self.font_size = new.font_size;
         self.weight = new.weight;
         self.color = new.color;
@@ -131,7 +185,7 @@ impl<S: 'static> Widget<S> for Label {
 
     fn paint(&mut self, cx: &mut PaintCx, p: &mut dyn Painter) {
         if let Some(layout) = &self.layout {
-            p.draw_text(layout, cx.content().origin(), self.color.unwrap_or(cx.theme().text));
+            p.draw_text(layout, cx.content().origin(), self.type_style(cx.theme()).color);
         }
     }
 

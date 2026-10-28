@@ -1,4 +1,4 @@
-//! Windows 实现：剪贴板、光标闪烁、双击参数、字体目录、默认字体。
+//! Windows 实现：剪贴板、光标闪烁、双击参数、动画开关、字体目录、默认字体。
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -10,7 +10,9 @@ use windows_sys::Win32::System::DataExchange::{
 use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock};
 use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
-use windows_sys::Win32::UI::WindowsAndMessaging::{GetCaretBlinkTime, GetSystemMetrics, SM_CXDOUBLECLK};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetCaretBlinkTime, GetSystemMetrics, SM_CXDOUBLECLK, SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
+};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
@@ -117,6 +119,13 @@ pub(crate) fn double_click_distance() -> f64 {
     if px > 0 { px as f64 } else { 4.0 }
 }
 
+/// “设置 → 辅助功能 → 视觉效果 → 动画效果”关掉时返回 `true`。
+pub(crate) fn reduce_motion() -> bool {
+    let mut enabled: i32 = 1;
+    let ok = unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&mut enabled as *mut i32).cast(), 0) };
+    ok != 0 && enabled == 0
+}
+
 pub(crate) fn font_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let windir = std::env::var_os("WINDIR")
@@ -133,28 +142,31 @@ pub(crate) fn font_dirs() -> Vec<PathBuf> {
 
 pub(crate) fn default_font_families(locale: &str) -> FontFamilies {
     let lang = locale.to_ascii_lowercase();
-    let sans: &[&str] = if lang.starts_with("zh-tw") || lang.starts_with("zh-hk") || lang.starts_with("zh-hant") {
-        &["Microsoft JhengHei UI", "Microsoft JhengHei", "Segoe UI"]
+    // 西文用系统界面字体（Windows 11 的 Segoe UI Variable，Windows 10 退到 Segoe UI），
+    // 汉字等由 cosmic-text 按文字和语言回退（简体中文是 Microsoft YaHei UI）。
+    // 两种 Segoe 都找不到时才用后面的中日韩字体做默认字体。
+    let cjk: &[&str] = if lang.starts_with("zh-tw") || lang.starts_with("zh-hk") || lang.starts_with("zh-hant") {
+        &["Microsoft JhengHei UI", "Microsoft JhengHei"]
     } else if lang.starts_with("zh") {
-        &["Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"]
+        &["Microsoft YaHei UI", "Microsoft YaHei"]
     } else if lang.starts_with("ja") {
-        &["Yu Gothic UI", "Meiryo UI", "Segoe UI"]
+        &["Yu Gothic UI", "Meiryo UI"]
     } else if lang.starts_with("ko") {
-        &["Malgun Gothic", "Segoe UI"]
+        &["Malgun Gothic"]
     } else {
-        &["Segoe UI", "Microsoft YaHei UI"]
+        &["Microsoft YaHei UI"]
     };
     let serif: &[&str] = if lang.starts_with("zh") {
         &["SimSun", "Times New Roman"]
     } else {
         &["Times New Roman", "Cambria"]
     };
+    let list = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let mut sans_serif = list(&["Segoe UI Variable", "Segoe UI"]);
+    sans_serif.extend(list(cjk));
     FontFamilies {
-        sans_serif: sans.iter().map(|s| s.to_string()).collect(),
-        serif: serif.iter().map(|s| s.to_string()).collect(),
-        monospace: ["Cascadia Mono", "Consolas", "Courier New"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
+        sans_serif,
+        serif: list(serif),
+        monospace: list(&["Cascadia Mono", "Consolas", "Courier New"]),
     }
 }
