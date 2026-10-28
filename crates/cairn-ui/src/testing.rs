@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use cairn_ui_platform::{self as platform, ImeEvent, Key, KeyEvent, Modifiers, PixelRect, PointerButton};
+use cairn_ui_platform::{self as platform, ImeEvent, Key, KeyEvent, Modifiers, PixelRect, PointerButton, ScrollDelta};
 
 use crate::app::{ViewFn, erase_view, system_fonts};
 use crate::host::{FRAME_INTERVAL, RecordingHost};
@@ -194,6 +194,12 @@ impl<S: 'static> Headless<S> {
         self.pointer_move(p);
         self.pointer_button(PointerButton::Left, true);
         self.pointer_button(PointerButton::Left, false);
+    }
+
+    /// 滚轮（作用在指针当前悬停的控件上，未处理就冒泡）。`Lines` 的 `y` 为正是向上滚，与 winit 一致；
+    /// `Pixels` 是物理像素。
+    pub fn wheel(&mut self, delta: ScrollDelta) {
+        self.send(platform::Event::Wheel(delta));
     }
 
     pub fn set_modifiers(&mut self, m: Modifiers) {

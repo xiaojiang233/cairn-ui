@@ -180,7 +180,8 @@ impl<S: 'static> Ui<S> {
         if let Some(n) = self.tree.nodes.get(id)
             && n.laid_out
         {
-            self.damage.add(n.visual(&self.theme));
+            let visual = n.visual(&self.theme);
+            self.tree.damage_rect(id, visual, &self.theme, &mut self.damage);
         }
     }
 
@@ -199,6 +200,7 @@ impl<S: 'static> Ui<S> {
             theme: &self.theme,
             host: &mut *host,
             focused: self.focused == Some(id),
+            captured: self.captured == Some(id),
             window_focused: self.window_focused,
             modifiers: self.modifiers,
             scale: self.scale,
@@ -212,11 +214,13 @@ impl<S: 'static> Ui<S> {
             self.tree.layout.mark_dirty(node.layout);
             self.tree.needs_layout = true;
         }
-        if out.change.paint && node.laid_out {
-            self.damage.add(node.visual(&self.theme));
+        if out.arrange {
+            self.tree.needs_arrange = true;
         }
-        for r in out.damage {
-            self.damage.add(r);
+        // 脏区先去掉被祖先（滚动容器）裁剪掉的部分：滚出视口的控件请求重绘不该触发视口外的重画。
+        let visual = (out.change.paint && node.laid_out).then(|| node.visual(&self.theme));
+        for r in visual.into_iter().chain(out.damage) {
+            self.tree.damage_rect(id, r, &self.theme, &mut self.damage);
         }
         if out.app_touched {
             self.rebuild = true;
@@ -626,15 +630,19 @@ fn paint_node<S: 'static>(st: &mut PaintState<S>, id: WidgetId, p: &mut dyn Pain
     let bounds = node.bounds;
     // 裁剪子元素的控件本身不在重画区域内时，子元素也不可能在。
     if clip.is_none() || visible {
-        if let Some(radius) = clip {
-            p.push_rounded_clip(bounds, radius);
-        }
-        for i in 0..st.tree.nodes[id].children.len() {
-            let child = st.tree.nodes[id].children[i];
-            paint_node(st, child, p);
-        }
-        if clip.is_some() {
-            p.pop_clip();
+        match clip {
+            None => paint_children(st, id, p),
+            Some(radius) => {
+                // 子元素只可能画进裁剪区，所以重画区域也收窄到裁剪区：滚出视口的子元素在可见性判断里
+                // 直接被跳过。收窄后为空（只有本控件的阴影之类落在区域里）则子元素一个也不用画。
+                if let Some(inside) = st.area.intersection(&bounds) {
+                    let outer = std::mem::replace(&mut st.area, inside);
+                    p.push_rounded_clip(bounds, radius);
+                    paint_children(st, id, p);
+                    p.pop_clip();
+                    st.area = outer;
+                }
+            }
         }
     }
     if visible {
@@ -645,5 +653,12 @@ fn paint_node<S: 'static>(st: &mut PaintState<S>, id: WidgetId, p: &mut dyn Pain
     }
     if cx.frame_requested && !st.animating.contains(&id) {
         st.animating.push(id);
+    }
+}
+
+fn paint_children<S: 'static>(st: &mut PaintState<S>, id: WidgetId, p: &mut dyn Painter) {
+    for i in 0..st.tree.nodes[id].children.len() {
+        let child = st.tree.nodes[id].children[i];
+        paint_node(st, child, p);
     }
 }

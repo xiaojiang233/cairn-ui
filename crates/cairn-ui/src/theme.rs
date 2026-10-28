@@ -148,6 +148,24 @@ pub struct InputStyle {
     pub padding: Insets,
 }
 
+/// 滚动容器（[`crate::scroll`]）的滚动条与滚轮手感。滚动条是画在内容上面的细长滑块，没有轨道底色。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollStyle {
+    /// 滑块宽度（逻辑像素）：静止时，以及指针移到滚动条上或正在拖动时。
+    pub bar_width: f32,
+    pub bar_width_hover: f32,
+    /// 滑块离视口右、上、下边缘的距离。
+    pub bar_inset: f32,
+    /// 滑块的最小长度：内容再长，滑块也不会缩成一个点。
+    pub min_thumb: f32,
+    /// 滑块颜色：静止时；指针在滚动区域内时；指针在滚动条上或正在拖动时。
+    pub thumb: Color,
+    pub thumb_hover: Color,
+    pub thumb_active: Color,
+    /// 滚轮每格滚动的距离（逻辑像素）。
+    pub wheel_step: f32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SliderStyle {
     pub track_height: f32,
@@ -183,6 +201,8 @@ pub struct Motion {
     pub press: Duration,
     /// 焦点光晕。
     pub focus: Duration,
+    /// 滚轮的平滑滚动。0 表示滚轮一格直接跳到位。
+    pub scroll: Duration,
     pub easing: Easing,
     pub press_easing: Easing,
 }
@@ -194,6 +214,7 @@ impl Motion {
             hover: Duration::ZERO,
             press: Duration::ZERO,
             focus: Duration::ZERO,
+            scroll: Duration::ZERO,
             ..self
         }
     }
@@ -225,6 +246,7 @@ pub struct Theme {
     pub accent_button: ButtonStyle,
     pub icon_button: IconButtonStyle,
     pub input: InputStyle,
+    pub scroll: ScrollStyle,
     pub slider: SliderStyle,
     /// 没有专门“禁用”配色的控件（图标按钮、滑块）禁用时的整体不透明度。
     pub disabled_opacity: f32,
@@ -352,6 +374,16 @@ impl Theme {
                 preedit: text,
                 padding: Insets::symmetric(10.0, 7.0),
             },
+            scroll: ScrollStyle {
+                bar_width: 6.0,
+                bar_width_hover: 8.0,
+                bar_inset: 3.0,
+                min_thumb: 32.0,
+                thumb: Color::rgbaf(30, 32, 36, 0.22),
+                thumb_hover: Color::rgbaf(30, 32, 36, 0.35),
+                thumb_active: Color::rgbaf(30, 32, 36, 0.5),
+                wheel_step: 56.0,
+            },
             slider: SliderStyle {
                 track_height: 4.0,
                 track: Color::hex(0xDADDE2),
@@ -371,6 +403,7 @@ impl Theme {
                 hover: Duration::ZERO,
                 press: Duration::ZERO,
                 focus: Duration::ZERO,
+                scroll: Duration::ZERO,
                 easing: Easing::EaseOut,
                 press_easing: Easing::EaseOut,
             },
@@ -510,6 +543,16 @@ impl Theme {
                 preedit: moon,
                 padding: Insets::symmetric(12.0, 8.0),
             },
+            scroll: ScrollStyle {
+                bar_width: 6.0,
+                bar_width_hover: 8.0,
+                bar_inset: 3.0,
+                min_thumb: 32.0,
+                thumb: white(0.16),
+                thumb_hover: white(0.28),
+                thumb_active: white(0.42),
+                wheel_step: 56.0,
+            },
             slider: SliderStyle {
                 track_height: 6.0,
                 track: white(0.10),
@@ -528,6 +571,7 @@ impl Theme {
                 hover: Duration::from_millis(500),
                 press: Duration::from_millis(150),
                 focus: Duration::from_millis(500),
+                scroll: Duration::from_millis(220),
                 easing: Easing::SMOOTH,
                 press_easing: Easing::EaseOut,
             },

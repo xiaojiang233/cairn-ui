@@ -102,6 +102,8 @@ pub enum Role {
     Button,
     TextInput,
     Slider,
+    /// 滚动容器（[`crate::scroll`]）。
+    ScrollArea,
 }
 
 /// 控件的语义信息，用于以后接入无障碍接口，也方便测试里按文字查找控件。
@@ -138,6 +140,22 @@ pub trait Widget<S: 'static>: Any {
     /// 每次布局完成后调用，告知最终的边框盒与内容区（窗口坐标）。
     fn arrange(&mut self, _cx: &mut LayoutCx, _bounds: Rect, _content: Rect) {}
 
+    /// 紧接在 [`Widget::arrange`] 之后、子元素定位之前调用（只对有子元素的控件）：告知子元素占据的范围，
+    /// 供滚动容器据此限制滚动量。
+    ///
+    /// `content_size` 是从本控件边框盒左上角算起的范围，与 CSS 的 `scrollWidth` / `scrollHeight` 相同：
+    /// 每个可见子元素的“布局位置 + 尺寸 + 右 / 下外边距”的最大值，再加上本控件自己的右 / 下内边距。
+    /// 窗口尺寸或内容变化后都会重新调用。
+    fn arrange_content(&mut self, _cx: &mut LayoutCx, _content_size: Size) {}
+
+    /// 所有子元素的整体平移量：子元素的窗口位置 = 布局位置 − 这个值。滚动容器返回当前的滚动量。
+    ///
+    /// 这平移的是子元素**真实的**边框盒，不是只改绘制：命中测试、事件坐标、输入法候选框、焦点框和脏区
+    /// 因此始终一致。滚动量改变后用 [`EventCx::request_arrange`] 通知框架重新定位子元素。
+    fn child_offset(&self) -> Point {
+        Point::ZERO
+    }
+
     /// 本控件在任何状态下可能画到的范围（窗口坐标）：阴影、外发光、焦点框、悬停上浮都要算进去。
     /// 用于计算脏区和跳过画不到的控件。默认是边框盒（框架另外留了 4 像素余量给抗锯齿和焦点框）。
     fn visual_bounds(&self, bounds: Rect, _theme: &Theme) -> Rect {
@@ -161,6 +179,12 @@ pub trait Widget<S: 'static>: Any {
     /// 返回 `Some(圆角半径)` 时，子元素被裁剪到本控件的边框盒内（绘制和点击判定都是）。
     fn clip_children(&self, _theme: &Theme) -> Option<f32> {
         None
+    }
+
+    /// 窗口坐标 `pos`（已在 `bounds` 内）处的指针是否归本控件，而不是它下面的子元素：返回 `true`
+    /// 时命中测试在本控件停下，不再看子元素。用于画在子元素上面的东西（滚动条）。
+    fn intercepts_pointer(&self, _pos: Point, _bounds: Rect, _theme: &Theme) -> bool {
+        false
     }
 
     /// 画自己（在子元素下面）。
@@ -295,6 +319,8 @@ pub(crate) struct EventOutput {
     pub app_touched: bool,
     pub request_focus: bool,
     pub timer: Option<Instant>,
+    /// 子元素的位置需要重新计算（滚动量变了），但不需要重新测量。
+    pub arrange: bool,
 }
 
 /// 事件处理时可用的上下文。
@@ -306,6 +332,7 @@ pub struct EventCx<'a, S> {
     pub(crate) theme: &'a Theme,
     pub(crate) host: &'a mut dyn Host,
     pub(crate) focused: bool,
+    pub(crate) captured: bool,
     pub(crate) window_focused: bool,
     pub(crate) modifiers: Modifiers,
     pub(crate) scale: f32,
@@ -341,6 +368,13 @@ impl<'a, S> EventCx<'a, S> {
         self.out.change = Change::LAYOUT;
     }
 
+    /// 子元素的位置需要重新计算，但尺寸没变、不用重新测量（例如 [`Widget::child_offset`] 变了）。
+    /// 比 [`EventCx::request_layout`] 轻得多：不跑布局引擎，只重新定位各节点并记录移动了的区域。
+    /// 不隐含重绘，需要的话另外调用 [`EventCx::request_paint`]。
+    pub fn request_arrange(&mut self) {
+        self.out.arrange = true;
+    }
+
     pub fn request_focus(&mut self) {
         self.out.request_focus = true;
     }
@@ -360,6 +394,13 @@ impl<'a, S> EventCx<'a, S> {
 
     pub fn is_focused(&self) -> bool {
         self.focused
+    }
+
+    /// 本控件正独占指针事件：它处理了按下事件，到松开之前所有指针事件都先交给它。
+    /// 拖动中的控件可以据此发现独占已经丢了（例如窗口失去焦点，松开事件不会再来）。
+    /// 注意松开事件到达时独占已经解除，这里返回 `false`。
+    pub fn is_captured(&self) -> bool {
+        self.captured
     }
 
     pub fn window_focused(&self) -> bool {
@@ -382,6 +423,12 @@ impl<'a, S> EventCx<'a, S> {
     /// 系统设置的文本光标闪烁间隔。`None` 表示不闪烁。
     pub fn caret_blink_interval(&self) -> Option<Duration> {
         self.blink
+    }
+
+    /// 动画帧间隔（显示器刷新间隔）。用 [`EventCx::request_timer`] 逐帧驱动动画时，
+    /// 下一帧排在 `now() + frame_interval()`。
+    pub fn frame_interval(&self) -> Duration {
+        self.host.frame_interval()
     }
 
     pub fn text(&mut self) -> &mut TextSystem {
