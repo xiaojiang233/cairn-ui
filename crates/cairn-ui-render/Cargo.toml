@@ -1,0 +1,13 @@
+[package]
+name = "cairn-ui-render"
+description = "cairn-ui 渲染层：Painter 抽象、tiny-skia CPU 实现、文字排版与字形缓存"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+tiny-skia = { workspace = true }
+cosmic-text = { workspace = true }

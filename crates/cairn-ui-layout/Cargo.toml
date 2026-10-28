@@ -1,0 +1,12 @@
+[package]
+name = "cairn-ui-layout"
+description = "cairn-ui 布局层：taffy 的薄封装"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+taffy = { workspace = true }

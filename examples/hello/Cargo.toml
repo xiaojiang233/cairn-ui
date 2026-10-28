@@ -1,0 +1,12 @@
+[package]
+name = "hello"
+description = "cairn-ui 演示：标签、按钮、文本输入框"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+cairn-ui = { workspace = true }

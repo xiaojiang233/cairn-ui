@@ -1,0 +1,48 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "examples/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# cosmic-text 0.19 要求 1.89。
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/xiaojiang233/cairn-ui"
+publish = false
+
+[workspace.dependencies]
+cairn-ui = { path = "crates/cairn-ui" }
+cairn-ui-platform = { path = "crates/cairn-ui-platform" }
+cairn-ui-render = { path = "crates/cairn-ui-render" }
+cairn-ui-layout = { path = "crates/cairn-ui-layout" }
+
+# 依赖都关掉默认特性，只开用得上的，控制最终 exe 体积。
+# winit / softbuffer 的 Linux 后端在 cairn-ui-platform 里按 target 单独打开。
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
+softbuffer = { version = "0.4.8", default-features = false }
+# 去掉 png-format（会拉进 png + flate2 + miniz）。
+tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "simd"] }
+# 去掉 fontconfig；字体目录由 cairn-ui-platform 提供。
+cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash"] }
+# 只要 flexbox；grid / block / float / calc 暂时用不上。
+taffy = { version = "0.15.1", default-features = false, features = ["std", "taffy_tree", "flexbox"] }
+# 下面三个已经在依赖树里（taffy / fontdb / cosmic-text 用到），直接依赖不增加体积。
+slotmap = "1.1"
+unicode-segmentation = "1.13"
+sys-locale = "0.3"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
