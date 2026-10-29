@@ -19,6 +19,8 @@ pub enum Easing {
 impl Easing {
     /// `cubic-bezier(0.16, 1, 0.3, 1)`：起步快、收尾很长，没有回弹。
     pub const SMOOTH: Easing = Easing::CubicBezier(0.16, 1.0, 0.3, 1.0);
+    /// CSS `ease-in-out`：两头慢、中间快。
+    pub const EASE_IN_OUT: Easing = Easing::CubicBezier(0.42, 0.0, 0.58, 1.0);
 
     /// 时间进度 `t`（0–1）对应的数值进度。
     pub fn apply(&self, t: f32) -> f32 {

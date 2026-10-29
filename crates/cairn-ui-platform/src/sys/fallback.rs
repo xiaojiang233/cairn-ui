@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use winit::window::Window;
+use winit::window::{Window, WindowAttributes};
 
 use crate::FontFamilies;
 
@@ -69,4 +69,8 @@ pub(crate) fn default_font_families(_locale: &str) -> FontFamilies {
             monospace: list(&["Noto Sans Mono", "DejaVu Sans Mono"]),
         }
     }
+}
+
+pub(crate) fn undecorated(attrs: WindowAttributes) -> WindowAttributes {
+    attrs
 }

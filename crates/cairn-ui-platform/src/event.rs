@@ -26,6 +26,25 @@ pub enum Event {
     ModifiersChanged(Modifiers),
     /// 输入法事件。只有调用过 [`crate::Context::set_ime_allowed`]`(true)` 才会收到。
     Ime(ImeEvent),
+    /// 有文件被拖到窗口上方（还没松开）。拖入多个文件时每个文件一个事件。
+    FileHovered(std::path::PathBuf),
+    /// 拖到窗口上方的文件又被拖走了。
+    FileHoverCancelled,
+    /// 文件被拖放进窗口。拖入多个文件时每个文件一个事件。
+    FileDropped(std::path::PathBuf),
+}
+
+/// 改变窗口大小时拖动的边或角。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ResizeEdge {
+    North,
+    South,
+    East,
+    West,
+    NorthEast,
+    NorthWest,
+    SouthEast,
+    SouthWest,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -146,4 +165,12 @@ pub enum CursorIcon {
     /// I 形，用于文本。
     Text,
     NotAllowed,
+    /// 左右双向箭头，用于改变宽度。
+    ResizeHorizontal,
+    /// 上下双向箭头，用于改变高度。
+    ResizeVertical,
+    /// 左上—右下双向箭头。
+    ResizeNwSe,
+    /// 右上—左下双向箭头。
+    ResizeNeSw,
 }

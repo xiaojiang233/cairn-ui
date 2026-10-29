@@ -8,6 +8,7 @@ use crate::text_edit::EditState;
 use crate::theme::Theme;
 use crate::widget::{Change, Event, EventCx, LayoutCx, PaintCx, Role, Semantics, Widget};
 use crate::widgets::common::drive;
+use crate::widgets::icon::{Icon, paint_icon};
 use crate::{
     CursorIcon, FontFamily, ImeEvent, Insets, Key, KeyEvent, NamedKey, Painter, Point, PointerButton, Rect, Shadow,
     Size, Style, TextLayout, TextStyle,
@@ -50,6 +51,7 @@ pub struct TextInput<S: 'static> {
     dragging: bool,
     hover: Transition,
     focus: Transition,
+    icon: Option<Icon>,
 }
 
 pub fn text_input<S: 'static>(value: impl Into<String>) -> TextInput<S> {
@@ -74,6 +76,7 @@ pub fn text_input<S: 'static>(value: impl Into<String>) -> TextInput<S> {
         dragging: false,
         hover: Transition::default(),
         focus: Transition::default(),
+        icon: None,
     }
 }
 
@@ -101,6 +104,12 @@ fn sanitize(s: &str) -> String {
 
 impl<S: 'static> TextInput<S> {
     /// 内容为空时显示的提示文字。
+    /// 文字前面的图标（例如搜索框的放大镜），画在左内边距里，外观取主题的 `input.icon*`。
+    pub fn icon(mut self, icon: Icon) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
     pub fn placeholder(mut self, text: impl Into<String>) -> Self {
         self.placeholder = text.into();
         self
@@ -362,6 +371,10 @@ impl<S: 'static> TextInput<S> {
 
 impl<S: 'static> Widget<S> for TextInput<S> {
     fn update(&mut self, cx: &mut LayoutCx, new: Self) -> Change {
+        if new.icon != self.icon {
+            self.icon = new.icon;
+            // 内边距由 resolve_style 按新图标重新计算，样式变化会触发重新布局。
+        }
         let mut change = Change::NONE;
         let controlled = new.on_change.is_some();
         let external = new.value != self.value;
@@ -387,6 +400,10 @@ impl<S: 'static> Widget<S> for TextInput<S> {
     fn resolve_style(&self, style: &mut Style, theme: &Theme) {
         if style.padding.is_auto() {
             style.padding = theme.input.padding;
+        }
+        // 图标画在左内边距里：把内边距加宽一个图标加间距。
+        if self.icon.is_some() {
+            style.padding.left += theme.input.icon_size + theme.input.icon_gap;
         }
     }
 
@@ -440,6 +457,11 @@ impl<S: 'static> Widget<S> for TextInput<S> {
             look.border_width
         };
         p.stroke_rect(b, radius, width, border);
+        if let Some(icon) = self.icon {
+            let s = look.icon_size;
+            let r = Rect::new(c.x - look.icon_gap - s, b.y + (b.height - s) / 2.0, s, s);
+            paint_icon(p, icon, r, look.icon);
+        }
 
         let (Some(display), Some(hint)) = (&self.display, &self.hint) else {
             return;

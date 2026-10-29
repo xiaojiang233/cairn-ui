@@ -62,17 +62,20 @@ mod widgets;
 pub mod testing;
 
 pub use anim::{Easing, Transition};
-pub use app::{App, Proxy, ViewFn};
+pub use app::{App, FileDrop, Proxy, ViewFn};
 pub use element::{El, Styled, View};
 pub use theme::{
-    ButtonStyle, FocusRing, IconButtonStyle, InputStyle, Motion, PanelStyle, Radii, ScrollStyle, SliderStyle, Spacing,
-    Theme, TypeStyle, Typography,
+    ButtonStyle, CaptionStyle, CheckboxStyle, FocusRing, IconButtonStyle, InputStyle, ListItemStyle, Motion,
+    PanelStyle, ProgressStyle, Radii, ScrollStyle, SliderStyle, Spacing, TabStyle, TagStyle, Theme, TypeStyle,
+    Typography,
 };
 pub use tree::WidgetId;
 pub use widget::{Change, Event, EventCx, LayoutCx, PaintCx, Role, Semantics, Widget};
 pub use widgets::{
-    Button, Flex, Icon, IconButton, Label, Panel, Scroll, Slider, TextInput, TextRole, button, column, icon_button,
-    label, paint_icon, panel, row, scroll, slider, text_input,
+    Button, Checkbox, ClickArea, Divider, DragArea, Flex, Icon, IconButton, IconView, Label, ListItem, Panel,
+    ProgressBar, Reveal, Scroll, Slider, Spinner, Tab, Tag, TextInput, TextRole, WindowControls, button, checkbox,
+    click_area, column, divider, drag_area, icon, icon_button, label, list_item, paint_icon, panel, progress_bar,
+    reveal, row, scroll, slider, spinner, tab, tag, text_input, window_controls,
 };
 
 pub use cairn_ui_layout::{Align, AvailableSpace, Direction, Insets, Justify, Length, MeasureInput, Style};
@@ -80,15 +83,17 @@ pub use cairn_ui_platform::{
     CursorIcon, ImeEvent, Key, KeyEvent, Modifiers, NamedKey, PixelRect, PointerButton, ScrollDelta,
 };
 pub use cairn_ui_render::{
-    Affine, BackdropStyle, Background, Brush, Canvas, Color, DeviceRect, FontFamily, FontSetup, GradientStop, Image,
-    ImageScene, NightScene, Painter, Point, Rect, Scene, Shadow, Size, Spot, TextLayout, TextStyle, TextSystem,
+    Affine, BackdropStyle, Background, Brush, Canvas, Color, DeviceRect, FillRule, FontFamily, FontSetup, GradientStop,
+    Image, ImageScene, LineCap, LineJoin, NightScene, Painter, Path, PathParseError, Point, Rect, Scene, Seg, Shadow,
+    Size, Spot, StrokeStyle, TextLayout, TextStyle, TextSystem,
 };
 
 /// 常用导入：`use cairn_ui::prelude::*;`
 pub mod prelude {
     pub use crate::{
-        Align, App, Color, El, Icon, Insets, Justify, Proxy, Styled, Theme, View, button, column, icon_button, label,
-        panel, row, scroll, slider, text_input,
+        Align, App, Color, El, Icon, Insets, Justify, Proxy, Styled, Theme, View, button, checkbox, click_area, column,
+        divider, drag_area, icon, icon_button, label, list_item, panel, progress_bar, reveal, row, scroll, slider,
+        spinner, tab, tag, text_input, window_controls,
     };
 }
 

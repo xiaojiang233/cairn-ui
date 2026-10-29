@@ -104,6 +104,10 @@ pub enum Role {
     Slider,
     /// 滚动容器（[`crate::scroll`]）。
     ScrollArea,
+    Checkbox,
+    Tab,
+    ProgressBar,
+    ListItem,
 }
 
 /// 控件的语义信息，用于以后接入无障碍接口，也方便测试里按文字查找控件。
@@ -174,6 +178,22 @@ pub trait Widget<S: 'static>: Any {
     /// 只读取 [`Widget::animate`] 已经更新过的过渡值。
     fn transform(&self, _cx: &PaintCx) -> Affine {
         Affine::IDENTITY
+    }
+
+    /// 本控件及其子元素整体的不透明度（0–1），用于淡入淡出，默认 1。小于 1 时整棵子树先画进离屏图层、
+    /// 再按这个值混合，叠在一起的子元素不会互相透出。只影响绘制，不影响布局和点击判定。
+    /// 只读取 [`Widget::animate`] 已经更新过的过渡值。
+    fn opacity(&self, _cx: &PaintCx) -> f32 {
+        1.0
+    }
+
+    /// 返回 `true` 时，本控件及其子树被画成一张位图缓存起来，之后的帧只把这张位图按
+    /// [`Widget::transform`]、[`Widget::opacity`] 合成上去，不再重画里面的内容——
+    /// 整块面板淡入、滑入这类大面积动画因此每帧只需一次贴图。
+    /// 子树内容有任何变化（状态更新、重绘请求、换主题）时缓存自动重画。只应在动画进行时返回 `true`，
+    /// 静止时缓存的意义不大，还会占内存。
+    fn cache_layer(&self) -> bool {
+        false
     }
 
     /// 返回 `Some(圆角半径)` 时，子元素被裁剪到本控件的边框盒内（绘制和点击判定都是）。
@@ -260,9 +280,11 @@ pub struct PaintCx<'a> {
     pub(crate) focused: bool,
     pub(crate) focus_visible: bool,
     pub(crate) window_focused: bool,
+    pub(crate) window_maximized: bool,
     pub(crate) theme: &'a Theme,
     pub(crate) now: Instant,
     pub(crate) frame_requested: bool,
+    pub(crate) timer: Option<Instant>,
 }
 
 impl<'a> PaintCx<'a> {
@@ -294,6 +316,11 @@ impl<'a> PaintCx<'a> {
         self.window_focused
     }
 
+    /// 窗口处于最大化状态（窗口按钮据此显示“最大化”或“还原”）。
+    pub fn window_maximized(&self) -> bool {
+        self.window_maximized
+    }
+
     pub fn theme(&self) -> &'a Theme {
         self.theme
     }
@@ -307,6 +334,12 @@ impl<'a> PaintCx<'a> {
     /// 每帧都要重新请求；不再请求时动画帧自然停止，事件循环回到空闲等待。
     pub fn request_frame(&mut self) {
         self.frame_requested = true;
+    }
+
+    /// 在 `at` 时刻给本控件发一次 [`Event::Timer`]。动画在绘制时推进、却要在结束时通知应用
+    /// （例如退场动画播完后调用回调）时用：事件里才能调用应用的回调。
+    pub fn request_timer(&mut self, at: Instant) {
+        self.timer = Some(at);
     }
 }
 
@@ -437,6 +470,30 @@ impl<'a, S> EventCx<'a, S> {
 
     pub fn theme(&self) -> &'a Theme {
         self.theme
+    }
+
+    /// 开始用鼠标拖动窗口。用于关闭了系统标题栏（[`crate::App::decorations`]）时自己画的标题栏，
+    /// 在左键按下的事件里调用。
+    pub fn drag_window(&mut self) {
+        self.host.drag_window();
+    }
+
+    pub fn minimize_window(&mut self) {
+        self.host.minimize_window();
+    }
+
+    /// 最大化与还原之间切换。
+    pub fn toggle_maximize_window(&mut self) {
+        self.host.toggle_maximize_window();
+    }
+
+    pub fn is_window_maximized(&self) -> bool {
+        self.host.is_window_maximized()
+    }
+
+    /// 关闭窗口，结束 [`crate::App::run`]。
+    pub fn close_window(&mut self) {
+        self.host.exit();
     }
 
     pub fn clipboard_get(&mut self) -> Option<String> {

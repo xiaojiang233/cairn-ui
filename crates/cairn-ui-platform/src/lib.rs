@@ -55,6 +55,9 @@ pub struct WindowConfig {
     pub height: f64,
     pub min_size: Option<(f64, f64)>,
     pub resizable: bool,
+    /// 系统标题栏与边框。关闭后客户区铺满整个窗口，标题栏、窗口按钮、拖动和缩放边由上层自己画、自己处理
+    /// （[`Context::drag_window`]、[`Context::drag_resize_window`] 等）。Windows 上仍保留系统阴影与 Windows 11 圆角。
+    pub decorations: bool,
 }
 
 impl Default for WindowConfig {
@@ -65,6 +68,7 @@ impl Default for WindowConfig {
             height: 480.0,
             min_size: None,
             resizable: true,
+            decorations: true,
         }
     }
 }
@@ -202,6 +206,29 @@ impl Context<'_> {
         self.event_loop.exit();
     }
 
+    /// 开始用鼠标拖动窗口（系统的移动循环，支持拖到屏幕边缘贴靠）。在左键按下的事件里调用。
+    pub fn drag_window(&self) {
+        let _ = self.window.drag_window();
+    }
+
+    /// 开始从某条边或某个角拖动改变窗口大小。在左键按下的事件里调用。
+    pub fn drag_resize_window(&self, edge: ResizeEdge) {
+        let _ = self.window.drag_resize_window(convert::resize_direction(edge));
+    }
+
+    pub fn minimize(&self) {
+        self.window.set_minimized(true);
+    }
+
+    pub fn is_maximized(&self) -> bool {
+        self.window.is_maximized()
+    }
+
+    /// 最大化与还原之间切换。
+    pub fn toggle_maximize(&self) {
+        self.window.set_maximized(!self.window.is_maximized());
+    }
+
     pub fn proxy(&self) -> Proxy {
         Proxy(self.shared.proxy.clone())
     }
@@ -331,6 +358,7 @@ impl<H: Handler> Runner<H> {
         let mut attrs = Window::default_attributes()
             .with_title(c.title.clone())
             .with_resizable(c.resizable)
+            .with_decorations(c.decorations)
             // 先隐藏，画好第一帧再显示，避免创建时闪一下白底。
             .with_visible(false);
         match self.shared.scale_override {
@@ -346,6 +374,9 @@ impl<H: Handler> Runner<H> {
                     attrs = attrs.with_min_inner_size(LogicalSize::new(w, h));
                 }
             }
+        }
+        if !c.decorations {
+            attrs = sys::undecorated(attrs);
         }
         let window = Rc::new(
             event_loop
@@ -448,6 +479,9 @@ impl<H: Handler> ApplicationHandler<UserPayload> for Runner<H> {
             } => Event::Key(convert::key_event(&event)),
             WindowEvent::ModifiersChanged(m) => Event::ModifiersChanged(convert::modifiers(&m)),
             WindowEvent::Ime(ime) => Event::Ime(convert::ime(ime)),
+            WindowEvent::HoveredFile(path) => Event::FileHovered(path),
+            WindowEvent::HoveredFileCancelled => Event::FileHoverCancelled,
+            WindowEvent::DroppedFile(path) => Event::FileDropped(path),
             _ => return,
         };
         self.forward(event_loop, ev);

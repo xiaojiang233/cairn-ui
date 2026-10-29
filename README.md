@@ -2,7 +2,7 @@
 
 轻量、保留式的 Rust GUI 库。设计目标是作为库被别的应用直接依赖，所以重视清晰的公开 API、可控的体积和平台隔离。
 
-当前是 **0.1.0 / 第一阶段：基础框架**：Windows 窗口，标签、按钮、能输入中文的单行文本框，弹性布局，脏区重绘，DPI 适配。还没有滚动、图片、列表等，API 在 0.x 期间可能变化。
+当前是 **0.1.x**：Windows 窗口（含无边框窗口），标签、按钮、能输入中文的单行文本框、复选框、标签页、列表行、进度条、滚动容器，玻璃质感的面板与过渡动画，矢量路径绘制，弹性布局，脏区重绘，DPI 适配。API 在 0.x 期间可能变化。
 
 ```rust
 use cairn_ui::prelude::*;
@@ -77,6 +77,7 @@ cargo test --workspace
 | 变量 | 作用 |
 | --- | --- |
 | `CAIRN_UI_SCALE_FACTOR=1.5` | 忽略系统缩放，强制使用给定缩放因子。用来在不改系统设置的情况下看 125% / 150% 的效果；**不能**代替真实的系统缩放测试（不会走跨显示器的 DPI 变化流程）。 |
+| `CAIRN_UI_FRAME_STATS=1` | 每帧把重建 / 布局 / 缓存 / 绘制各阶段的耗时和重画面积打到标准错误，找动画卡顿时用。 |
 | `CAIRN_SNAPSHOT_DIR=路径` | 运行 `cargo test -p cairn-ui --test headless` 时把各缩放下的无窗口截图写成 PNG。 |
 
 ## 写法与状态模型
@@ -126,9 +127,19 @@ App::new(MyApp::view).run_with(|proxy| MyApp::new(proxy))
 | `column()` / `row()` | `child`、`children`、`gap`、`align`（交叉轴）、`justify`（主轴）、`wrap`、`background`、`corner_radius` |
 | `label(text)` | `font_size`、`weight` / `bold`、`color`；宽度不够时自动换行 |
 | `button(text)` | `on_click`、`enabled` |
-| `text_input(value)` | `placeholder`、`on_change`、`on_submit`（回车） |
+| `text_input(value)` | `placeholder`、`icon`、`on_change`、`on_submit`（回车） |
+| `checkbox(checked)` | `label`、`on_change`、`enabled` |
+| `tab(text)` | `icon`、`badge`、`selected`、`on_click`；一组放进 `row()` 就是标签栏 |
+| `list_item()` | 横向排子元素的一行，`selected`、`on_click`、悬停底色 |
+| `progress_bar(Some(0.4))` / `spinner()` | 进度条（`None` 为进度未知）/ 转圈 |
+| `scroll()` | 纵向滚动容器，`child` / `children` / `gap` |
+| `panel()` | 玻璃面板：`bar()` / `popover()` 是另外两种样式 |
+| `reveal()` | 出现与离开带位移和淡入淡出的容器，`leaving` / `on_left` |
+| `click_area()` | 没有外观的点击区，`absolute()` 铺满窗口可以做“点外面关闭” |
+| `icon(Icon::…)` / `icon_button(Icon::…)` | 线条图标与图标按钮 |
+| `drag_area()` / `window_controls()` | 无边框窗口的拖动区与窗口按钮 |
 
-所有元素都有布局修饰方法（`Styled` trait，单位逻辑像素）：`width`、`height`、`size`、`min_width` / `max_width` / `min_height` / `max_height`、`fill_width` / `fill_height`（占满父容器内容区）、`grow`（分配剩余空间）、`padding`、`margin`、`align_self`、`hidden`、`key`。
+所有元素都有布局修饰方法（`Styled` trait，单位逻辑像素）：`width`、`height`、`size`、`min_width` / `max_width` / `min_height` / `max_height`、`fill_width` / `fill_height`（占满父容器内容区）、`grow`（分配剩余空间）、`shrink`、`padding`、`margin`、`align_self`、`absolute` + `top` / `right` / `bottom` / `left`（绝对定位）、`hidden`、`key`。
 
 `column()` 的子元素默认靠左、不拉伸（与 Compose 一致）；`row()` 的子元素默认纵向居中。外观参数在 `Theme` 里，用 `App::theme` 设置。
 
@@ -137,6 +148,24 @@ App::new(MyApp::view).run_with(|proxy| MyApp::new(proxy))
 控件之间：点击可获得焦点的控件获得焦点，点别处失去焦点；Tab / Shift+Tab 按树顺序切换；通过键盘获得焦点的按钮显示焦点框，Enter / 空格触发点击。
 
 写自己的控件：实现 `Widget<S>` trait（`update`、`measure`、`paint`、`event` 等），用 `El::new(widget)` 包成元素。详见 [docs/architecture.md](docs/architecture.md)。
+
+## 矢量路径
+
+`Path` 用自己的设计坐标描述轮廓（例如 0–64 的方框），可以从 SVG 路径数据解析，也可以用 `move_to` / `line_to` / `quad_to` / `cubic_to` 拼，或用 `Path::circle` / `rounded_rect` 之类的现成形状。画的时候给一个把设计坐标映射到窗口的 `Affine`，同一条路径可以画成任意大小，边缘始终是矢量抗锯齿的：
+
+```rust
+use cairn_ui::{Affine, Brush, Color, FillRule, Path, Painter, StrokeStyle};
+
+fn paint_star(p: &mut dyn Painter, x: f32, y: f32, size: f32) {
+    let star = Path::parse("M32 4 L40 24 L60 26 L44 40 L49 60 L32 49 L15 60 L20 40 L4 26 L24 24 Z").unwrap();
+    // 64 × 64 的设计坐标放大到 `size`，左上角放在 (x, y)。
+    let at = Affine { scale: size / 64.0, dx: x, dy: y };
+    p.fill_path(&star, at, FillRule::NonZero, &Brush::Solid(Color::rgb(230, 180, 80)));
+    p.stroke_path(&star, at, &StrokeStyle::new(2.0), &Brush::Solid(Color::rgb(120, 80, 20)));
+}
+```
+
+渐变笔刷的坐标仍然是窗口坐标，需要时用 `at.apply` 换算。
 
 ## 工作区结构
 
@@ -182,9 +211,9 @@ docs/
 
 ## 已知限制
 
-- 没有滚动容器、图片、列表虚拟化、弹出层、多窗口。
+- 没有列表虚拟化、多窗口；图片只能画已经解码好的位图（`Image::from_rgba8`），库本身不解码。
 - 文本框没有撤销 / 重做；拖选到边缘时不会自动滚动。
-- 只有亮色主题；文字是灰度抗锯齿，混合时未做伽马校正（深底浅字会偏细）。
+- 文字是灰度抗锯齿；混合在 sRGB 空间里做，只按文字亮度校正了覆盖率，不是严格的线性空间混合。
 - 无障碍：控件已有稳定 id（`WidgetId`）和语义信息（`Semantics`），还没接 accesskit。
 - 每次状态变化整体重跑 `view`，很大的列表以后需要按需构建或缓存子树。
 - 非 Windows 平台的剪贴板与系统参数是占位实现。

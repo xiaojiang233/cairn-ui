@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use cairn_ui_platform::{Context, CursorIcon, PixelRect};
+use cairn_ui_platform::{Context, CursorIcon, PixelRect, ResizeEdge};
 
 pub(crate) trait Host {
     fn clipboard_get(&mut self) -> Option<String>;
@@ -15,6 +15,12 @@ pub(crate) trait Host {
     /// 动画帧间隔（显示器刷新间隔）。
     fn frame_interval(&self) -> Duration;
     fn exit(&mut self);
+    /// 无边框窗口自己处理的窗口操作。
+    fn drag_window(&mut self);
+    fn drag_resize_window(&mut self, edge: ResizeEdge);
+    fn minimize_window(&mut self);
+    fn toggle_maximize_window(&mut self);
+    fn is_window_maximized(&self) -> bool;
 }
 
 /// 真实窗口。
@@ -48,6 +54,21 @@ impl Host for PlatformHost<'_, '_> {
     fn exit(&mut self) {
         self.0.exit();
     }
+    fn drag_window(&mut self) {
+        self.0.drag_window();
+    }
+    fn drag_resize_window(&mut self, edge: ResizeEdge) {
+        self.0.drag_resize_window(edge);
+    }
+    fn minimize_window(&mut self) {
+        self.0.minimize();
+    }
+    fn toggle_maximize_window(&mut self) {
+        self.0.toggle_maximize();
+    }
+    fn is_window_maximized(&self) -> bool {
+        self.0.is_maximized()
+    }
 }
 
 /// 测试里假定的显示器刷新间隔（60 Hz）。
@@ -63,6 +84,10 @@ pub(crate) struct RecordingHost {
     pub redraw_requested: bool,
     pub wakeup: Option<Instant>,
     pub exit_requested: bool,
+    pub drag_requested: bool,
+    pub resize_requested: Option<ResizeEdge>,
+    pub minimized: bool,
+    pub maximized: bool,
 }
 
 impl Host for RecordingHost {
@@ -95,5 +120,20 @@ impl Host for RecordingHost {
     }
     fn exit(&mut self) {
         self.exit_requested = true;
+    }
+    fn drag_window(&mut self) {
+        self.drag_requested = true;
+    }
+    fn drag_resize_window(&mut self, edge: ResizeEdge) {
+        self.resize_requested = Some(edge);
+    }
+    fn minimize_window(&mut self) {
+        self.minimized = true;
+    }
+    fn toggle_maximize_window(&mut self) {
+        self.maximized = !self.maximized;
+    }
+    fn is_window_maximized(&self) -> bool {
+        self.maximized
     }
 }

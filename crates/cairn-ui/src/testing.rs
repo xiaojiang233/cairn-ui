@@ -189,6 +189,16 @@ impl<S: 'static> Headless<S> {
         self.send(platform::Event::PointerButton { button, pressed });
     }
 
+    /// 是否请求过关闭窗口（[`crate::EventCx::close_window`]）。
+    pub fn exit_requested(&self) -> bool {
+        self.host.exit_requested
+    }
+
+    /// 窗口是否处于最大化（模拟：最大化按钮在假宿主上切换这个状态）、是否请求过最小化。
+    pub fn window_state(&self) -> (bool, bool) {
+        (self.host.maximized, self.host.minimized)
+    }
+
     /// 移动到 `p` 并单击左键。
     pub fn click(&mut self, p: Point) {
         self.pointer_move(p);

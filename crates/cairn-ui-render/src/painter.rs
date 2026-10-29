@@ -2,6 +2,7 @@
 
 use crate::geom::{Affine, Color, Point, Rect};
 use crate::image::Image;
+use crate::path::Path;
 use crate::text::TextLayout;
 
 /// 渐变上的一个色标。`offset` 取 0–1。
@@ -142,6 +143,76 @@ impl Shadow {
     }
 }
 
+/// 填充规则：路径自交或有内环时，哪些区域算“里面”。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FillRule {
+    /// 非零环绕：同方向叠在一起的环都算里面。
+    #[default]
+    NonZero,
+    /// 奇偶：被围住的次数是奇数才算里面（内环会被挖空）。
+    EvenOdd,
+}
+
+/// 线段末端的形状。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LineCap {
+    #[default]
+    Butt,
+    Round,
+    Square,
+}
+
+/// 折线拐角的形状。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LineJoin {
+    #[default]
+    Miter,
+    Round,
+    Bevel,
+}
+
+/// 路径描边的样式。长度都用路径自己的坐标系，经 [`Painter::stroke_path`] 的变换缩放后才是逻辑像素
+/// （与 SVG 的 `stroke-width` 一致）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct StrokeStyle {
+    pub width: f32,
+    pub cap: LineCap,
+    pub join: LineJoin,
+    pub miter_limit: f32,
+    /// 虚线：一实一虚交替的长度，为空是实线。个数必须是偶数。
+    pub dash: Vec<f32>,
+    pub dash_offset: f32,
+}
+
+impl StrokeStyle {
+    pub fn new(width: f32) -> Self {
+        StrokeStyle {
+            width,
+            cap: LineCap::Butt,
+            join: LineJoin::Miter,
+            miter_limit: 4.0,
+            dash: Vec::new(),
+            dash_offset: 0.0,
+        }
+    }
+
+    pub fn cap(mut self, cap: LineCap) -> Self {
+        self.cap = cap;
+        self
+    }
+
+    pub fn join(mut self, join: LineJoin) -> Self {
+        self.join = join;
+        self
+    }
+
+    pub fn dash(mut self, dash: impl Into<Vec<f32>>, offset: f32) -> Self {
+        self.dash = dash.into();
+        self.dash_offset = offset;
+        self
+    }
+}
+
 /// 控件用来画自己的接口。
 ///
 /// 所有坐标都是**逻辑像素**（窗口坐标系）；实现负责乘以缩放因子换算到物理像素，
@@ -185,6 +256,14 @@ pub trait Painter {
     /// 填充多边形（自动闭合），用于画简单图标。
     fn fill_polygon(&mut self, points: &[Point], color: Color);
 
+    /// 填充矢量路径。`at` 把路径的设计坐标映射到逻辑像素（窗口坐标），再经过当前变换。
+    /// 渐变笔刷的坐标仍然是窗口坐标（见 [`Brush`]），需要时调用方用 `at.apply` 换算。
+    /// 边缘抗锯齿，不对齐像素网格。
+    fn fill_path(&mut self, path: &Path, at: Affine, rule: FillRule, brush: &Brush);
+
+    /// 描边矢量路径，坐标和线宽的含义同 [`Painter::fill_path`]。
+    fn stroke_path(&mut self, path: &Path, at: Affine, stroke: &StrokeStyle, brush: &Brush);
+
     /// 之后的绘制只落在这个圆角矩形与当前裁剪区的交集内，直到对应的 [`Painter::pop_clip`]。
     fn push_rounded_clip(&mut self, rect: Rect, radius: f32);
 
@@ -194,6 +273,16 @@ pub trait Painter {
     fn push_transform(&mut self, t: Affine);
 
     fn pop_transform(&mut self);
+
+    /// 之后的绘制先画进一个透明的离屏图层，直到对应的 [`Painter::pop_layer`] 时整体按 `opacity`（0–1）
+    /// 混合回去——一组叠在一起的东西一起淡入淡出，而不是各自变透明后互相透出。
+    /// `rect` 是图层内容大致的范围（逻辑像素，窗口坐标），后端可以用它决定离屏缓冲的大小；
+    /// 实际绘制仍以当前裁剪区为准。
+    ///
+    /// 默认实现忽略透明度、直接画（不支持图层的后端）。
+    fn push_layer(&mut self, _rect: Rect, _opacity: f32) {}
+
+    fn pop_layer(&mut self) {}
 
     // ------------------------------------------------------------ 便捷方法
 

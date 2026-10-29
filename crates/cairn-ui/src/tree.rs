@@ -73,6 +73,9 @@ pub(crate) struct Tree<S: 'static> {
     pub needs_arrange: bool,
     /// 本轮比对中被删除的节点，运行时据此清理焦点、悬停等引用。
     pub removed: Vec<WidgetId>,
+    /// 比对时节点新增、删除或内容 / 样式有变化的累计次数。运行时据此判断重建界面之后画面有没有变，
+    /// 没变就不必让合成层缓存作废。
+    pub changes: u64,
 }
 
 impl<S: 'static> Tree<S> {
@@ -98,6 +101,7 @@ impl<S: 'static> Tree<S> {
             needs_layout: true,
             needs_arrange: false,
             removed: Vec::new(),
+            changes: 0,
         }
     }
 
@@ -149,6 +153,7 @@ impl<S: 'static> Tree<S> {
         self.layout.set_children(self.nodes[id].layout, &layout_children);
         self.nodes[id].children = child_ids;
         self.needs_layout = true;
+        self.changes += 1;
         id
     }
 
@@ -179,11 +184,15 @@ impl<S: 'static> Tree<S> {
             self.layout.mark_dirty(node.layout);
             self.needs_layout = true;
         }
+        if change.layout || change.paint {
+            self.changes += 1;
+        }
         let visual = (change.paint && node.laid_out).then(|| node.visual(cx.theme));
         if node.style != style {
             self.layout.set_style(node.layout, &style);
             node.style = style;
             self.needs_layout = true;
+            self.changes += 1;
         }
         if let Some(visual) = visual {
             add_clipped(damage, visual, self.clip_of(id, cx.theme));
@@ -232,6 +241,7 @@ impl<S: 'static> Tree<S> {
             let layout_children: Vec<NodeId> = result.iter().map(|c| self.nodes[*c].layout).collect();
             self.layout.set_children(self.nodes[parent].layout, &layout_children);
             self.needs_layout = true;
+            self.changes += 1;
         }
         self.nodes[parent].children = result;
     }
@@ -249,6 +259,7 @@ impl<S: 'static> Tree<S> {
         }
         self.layout.remove(node.layout);
         self.removed.push(id);
+        self.changes += 1;
         let child_clip = if node.laid_out && node.widget.clip_children(theme).is_some() {
             narrow(clip, node.bounds)
         } else {
@@ -369,6 +380,41 @@ impl<S: 'static> Tree<S> {
             cur = n.parent;
         }
         clip
+    }
+
+    /// 节点的所有子孙（不含它自己）可能画到的范围之并（被裁剪子元素的祖先裁掉的部分不算），
+    /// 用于带变换或半透明的控件在动画中重画整棵子树。
+    pub fn descendants_visual(&self, id: WidgetId, theme: &Theme) -> Option<Rect> {
+        let node = self.nodes.get(id)?;
+        let clip = self.clip_of(id, theme);
+        let clip = if node.laid_out && node.widget.clip_children(theme).is_some() {
+            narrow(clip, node.bounds)
+        } else {
+            clip
+        };
+        let mut out: Option<Rect> = None;
+        let mut stack: Vec<(WidgetId, Option<Rect>)> = node.children.iter().map(|c| (*c, clip)).collect();
+        while let Some((n, clip)) = stack.pop() {
+            let Some(node) = self.nodes.get(n) else { continue };
+            if node.style.hidden || !node.laid_out {
+                continue;
+            }
+            let v = node.visual(theme);
+            let v = match clip {
+                Some(c) => v.intersection(&c),
+                None => Some(v),
+            };
+            if let Some(v) = v {
+                out = Some(out.map_or(v, |o| o.union(&v)));
+            }
+            let child_clip = if node.widget.clip_children(theme).is_some() {
+                narrow(clip, node.bounds)
+            } else {
+                clip
+            };
+            stack.extend(node.children.iter().map(|c| (*c, child_clip)));
+        }
+        out
     }
 
     /// 包含 `p` 的最深层节点（后画的在上面，优先命中）。
