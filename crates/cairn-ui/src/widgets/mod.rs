@@ -2,6 +2,7 @@
 
 mod button;
 mod checkbox;
+mod collapse;
 mod common;
 mod flex;
 mod icon;
@@ -20,6 +21,7 @@ mod window;
 
 pub use button::{Button, button};
 pub use checkbox::{Checkbox, checkbox};
+pub use collapse::{Collapse, collapse};
 pub use flex::{Flex, column, row};
 pub use icon::{Icon, paint_icon};
 pub use icon_button::{IconButton, icon_button};

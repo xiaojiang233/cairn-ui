@@ -54,7 +54,9 @@ pub struct WindowConfig {
     pub width: f64,
     pub height: f64,
     pub min_size: Option<(f64, f64)>,
+    pub max_size: Option<(f64, f64)>,
     pub resizable: bool,
+    pub maximizable: bool,
     /// 系统标题栏与边框。关闭后客户区铺满整个窗口，标题栏、窗口按钮、拖动和缩放边由上层自己画、自己处理
     /// （[`Context::drag_window`]、[`Context::drag_resize_window`] 等）。Windows 上仍保留系统阴影与 Windows 11 圆角。
     pub decorations: bool,
@@ -67,7 +69,9 @@ impl Default for WindowConfig {
             width: 640.0,
             height: 480.0,
             min_size: None,
+            max_size: None,
             resizable: true,
+            maximizable: true,
             decorations: true,
         }
     }
@@ -224,9 +228,15 @@ impl Context<'_> {
         self.window.is_maximized()
     }
 
+    pub fn is_maximizable(&self) -> bool {
+        self.shared.maximizable
+    }
+
     /// 最大化与还原之间切换。
     pub fn toggle_maximize(&self) {
-        self.window.set_maximized(!self.window.is_maximized());
+        if self.shared.maximizable {
+            self.window.set_maximized(!self.window.is_maximized());
+        }
     }
 
     pub fn proxy(&self) -> Proxy {
@@ -304,6 +314,7 @@ pub fn run<H: Handler>(config: WindowConfig, handler: H) -> Result<(), Error> {
         .ok()
         .and_then(|s| s.trim().parse::<f64>().ok())
         .filter(|s| s.is_finite() && *s >= 0.5 && *s <= 4.0);
+    let maximizable = config.maximizable;
     let mut runner = Runner {
         config,
         handler,
@@ -316,6 +327,7 @@ pub fn run<H: Handler>(config: WindowConfig, handler: H) -> Result<(), Error> {
             cursor: CursorIcon::Default,
             ime_allowed: false,
             ime_area: None,
+            maximizable,
         },
     };
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -335,6 +347,7 @@ struct Shared {
     cursor: CursorIcon,
     ime_allowed: bool,
     ime_area: Option<PixelRect>,
+    maximizable: bool,
 }
 
 struct WindowState {
@@ -367,13 +380,22 @@ impl<H: Handler> Runner<H> {
                 if let Some((w, h)) = c.min_size {
                     attrs = attrs.with_min_inner_size(PhysicalSize::new(w * s, h * s));
                 }
+                if let Some((w, h)) = c.max_size {
+                    attrs = attrs.with_max_inner_size(PhysicalSize::new(w * s, h * s));
+                }
             }
             None => {
                 attrs = attrs.with_inner_size(LogicalSize::new(c.width, c.height));
                 if let Some((w, h)) = c.min_size {
                     attrs = attrs.with_min_inner_size(LogicalSize::new(w, h));
                 }
+                if let Some((w, h)) = c.max_size {
+                    attrs = attrs.with_max_inner_size(LogicalSize::new(w, h));
+                }
             }
+        }
+        if !c.maximizable {
+            attrs = attrs.with_enabled_buttons(winit::window::WindowButtons::CLOSE | winit::window::WindowButtons::MINIMIZE);
         }
         if !c.decorations {
             attrs = sys::undecorated(attrs);

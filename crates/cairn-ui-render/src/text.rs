@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use cosmic_text::{
-    Attrs, Buffer, Cursor, Family, FontSystem, LineIter, Metrics, Shaping, SwashCache, Weight, Wrap, fontdb,
+    Attrs, Buffer, CacheKeyFlags, Cursor, Family, FontSystem, LineIter, Metrics, Shaping, SwashCache, Weight, Wrap, fontdb,
 };
 
 use crate::geom::{Point, Rect, Size};
@@ -138,7 +138,17 @@ impl TextStyle {
             FontFamily::Monospace => Family::Monospace,
             FontFamily::Named(name) => Family::Name(name),
         };
-        Attrs::new().family(family).weight(Weight(self.weight))
+        // 关键：Windows 上微软雅黑（Microsoft YaHei）等中文字体只有 400 (Regular) 和 700 (Bold) 两个物理字重。
+        // 若向系统字体库请求 500 或 600，fontdb 的精确匹配规则会优先拾取系统中恰好带有 500/600 字重的日文字体
+        // （如 YuGothicUI-Semibold、BIZ-UDMincho-Medium），造成同一个词汇里“一字日文游黑/明朝、一字中文等线”的交叉混排，
+        // 出现严重的字形形变畸变与基线交错不齐（文字上蹿下跳）。
+        // 遵循 W3C CSS 字体匹配规范，将字重归一化到存在的真实字重（< 600 对应 400 常规体，>= 600 对应 700 粗体）。
+        let weight = if self.weight >= 600 { 700 } else { 400 };
+        Attrs::new()
+            .family(family)
+            .weight(Weight(weight))
+            // 灰度抗锯齿下禁用字节码 Hinting，避免微软 TrueType Hinting 在小字号下强制像素网格贴合导致汉字笔画丢失、粘连或严重畸变（如“截”、“启”）。
+            .cache_key_flags(CacheKeyFlags::DISABLE_HINTING)
     }
 }
 
@@ -316,5 +326,21 @@ impl std::fmt::Debug for TextLayout {
             .field("text", &self.text)
             .field("size", &self.size)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attrs_have_disable_hinting_flag_and_quantized_weight() {
+        let regular = TextStyle { weight: 500, ..TextStyle::default() };
+        assert_eq!(regular.attrs().weight, Weight(400));
+        assert!(regular.attrs().cache_key_flags.contains(CacheKeyFlags::DISABLE_HINTING));
+
+        let bold = TextStyle { weight: 600, ..TextStyle::default() };
+        assert_eq!(bold.attrs().weight, Weight(700));
+        assert!(bold.attrs().cache_key_flags.contains(CacheKeyFlags::DISABLE_HINTING));
     }
 }

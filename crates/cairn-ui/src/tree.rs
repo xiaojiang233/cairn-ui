@@ -34,6 +34,8 @@ pub(crate) struct Node<S: 'static> {
     pub bounds: Rect,
     pub padding: Insets,
     pub laid_out: bool,
+    /// 布局引擎里这个节点用的是动画给出的高度（见 [`Widget::animated_height`]），不是 `style` 里的。
+    pub animated: bool,
 }
 
 impl<S: 'static> Node<S> {
@@ -93,6 +95,7 @@ impl<S: 'static> Tree<S> {
             bounds: Rect::ZERO,
             padding: Insets::ZERO,
             laid_out: false,
+            animated: false,
         });
         Tree {
             nodes,
@@ -147,6 +150,7 @@ impl<S: 'static> Tree<S> {
             bounds: Rect::ZERO,
             padding: Insets::ZERO,
             laid_out: false,
+            animated: false,
         });
         let child_ids: Vec<WidgetId> = children.into_iter().map(|c| self.build(cx, c, id)).collect();
         let layout_children: Vec<NodeId> = child_ids.iter().map(|c| self.nodes[*c].layout).collect();
@@ -280,6 +284,7 @@ impl<S: 'static> Tree<S> {
             return false;
         }
         if std::mem::take(&mut self.needs_layout) {
+            self.apply_animated_heights();
             let root = &self.nodes[self.root];
             let (w, h) = (root.bounds.width, root.bounds.height);
             let (w, h) = match (&root.style.width, &root.style.height) {
@@ -297,6 +302,28 @@ impl<S: 'static> Tree<S> {
         let root = self.root;
         self.update_bounds(cx, root, Point::ZERO, None, damage);
         true
+    }
+
+    /// 高度在动画中的节点（[`Widget::animated_height`]）：布局前把动画给的高度写进布局引擎，
+    /// 动画结束后把样式里原来的高度还回去。
+    fn apply_animated_heights(&mut self) {
+        for (_, node) in self.nodes.iter_mut() {
+            match node.widget.animated_height() {
+                Some(h) => {
+                    let mut style = node.style.clone();
+                    style.height = cairn_ui_layout::Length::Px(h);
+                    style.grow = 0.0;
+                    style.shrink = 0.0;
+                    self.layout.set_style(node.layout, &style);
+                    node.animated = true;
+                }
+                None if node.animated => {
+                    self.layout.set_style(node.layout, &node.style);
+                    node.animated = false;
+                }
+                None => {}
+            }
+        }
     }
 
     /// 定位 `id` 及其子树。`origin` 是父节点给子节点的原点（父节点的边框盒左上角减去 [`Widget::child_offset`]），

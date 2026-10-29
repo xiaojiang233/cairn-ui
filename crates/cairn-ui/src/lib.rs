@@ -72,10 +72,10 @@ pub use theme::{
 pub use tree::WidgetId;
 pub use widget::{Change, Event, EventCx, LayoutCx, PaintCx, Role, Semantics, Widget};
 pub use widgets::{
-    Button, Checkbox, ClickArea, Divider, DragArea, Flex, Icon, IconButton, IconView, Label, ListItem, Panel,
+    Button, Checkbox, ClickArea, Collapse, Divider, DragArea, Flex, Icon, IconButton, IconView, Label, ListItem, Panel,
     ProgressBar, Reveal, Scroll, Slider, Spinner, Tab, Tag, TextInput, TextRole, WindowControls, button, checkbox,
-    click_area, column, divider, drag_area, icon, icon_button, label, list_item, paint_icon, panel, progress_bar,
-    reveal, row, scroll, slider, spinner, tab, tag, text_input, window_controls,
+    click_area, collapse, column, divider, drag_area, icon, icon_button, label, list_item, paint_icon, panel,
+    progress_bar, reveal, row, scroll, slider, spinner, tab, tag, text_input, window_controls,
 };
 
 pub use cairn_ui_layout::{Align, AvailableSpace, Direction, Insets, Justify, Length, MeasureInput, Style};
@@ -91,9 +91,9 @@ pub use cairn_ui_render::{
 /// 常用导入：`use cairn_ui::prelude::*;`
 pub mod prelude {
     pub use crate::{
-        Align, App, Color, El, Icon, Insets, Justify, Proxy, Styled, Theme, View, button, checkbox, click_area, column,
-        divider, drag_area, icon, icon_button, label, list_item, panel, progress_bar, reveal, row, scroll, slider,
-        spinner, tab, tag, text_input, window_controls,
+        Align, App, Color, El, Icon, Insets, Justify, Proxy, Styled, Theme, View, button, checkbox, click_area,
+        collapse, column, divider, drag_area, icon, icon_button, label, list_item, panel, progress_bar, reveal, row,
+        scroll, slider, spinner, tab, tag, text_input, window_controls,
     };
 }
 

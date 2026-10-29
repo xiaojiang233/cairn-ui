@@ -201,6 +201,13 @@ pub trait Widget<S: 'static>: Any {
         None
     }
 
+    /// 返回 `Some(h)` 时，布局引擎把本节点的高度固定为 `h`（不增长、不收缩），子元素超出的部分
+    /// 由 [`Widget::clip_children`] 裁掉。用于高度随动画变化的容器（[`crate::collapse`]）：它每帧返回新的高度，
+    /// 并通过定时器事件请求重新布局，下面的兄弟元素就会跟着移动。默认 `None`，高度由样式和子元素决定。
+    fn animated_height(&self) -> Option<f32> {
+        None
+    }
+
     /// 窗口坐标 `pos`（已在 `bounds` 内）处的指针是否归本控件，而不是它下面的子元素：返回 `true`
     /// 时命中测试在本控件停下，不再看子元素。用于画在子元素上面的东西（滚动条）。
     fn intercepts_pointer(&self, _pos: Point, _bounds: Rect, _theme: &Theme) -> bool {
@@ -485,6 +492,10 @@ impl<'a, S> EventCx<'a, S> {
     /// 最大化与还原之间切换。
     pub fn toggle_maximize_window(&mut self) {
         self.host.toggle_maximize_window();
+    }
+
+    pub fn is_window_maximizable(&self) -> bool {
+        self.host.is_window_maximizable()
     }
 
     pub fn is_window_maximized(&self) -> bool {

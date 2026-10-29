@@ -122,6 +122,16 @@ impl<S: 'static> App<S> {
         self
     }
 
+    pub fn max_size(mut self, width: f32, height: f32) -> Self {
+        self.window.max_size = Some((width as f64, height as f64));
+        self
+    }
+
+    pub fn maximizable(mut self, maximizable: bool) -> Self {
+        self.window.maximizable = maximizable;
+        self
+    }
+
     pub fn resizable(mut self, resizable: bool) -> Self {
         self.window.resizable = resizable;
         self

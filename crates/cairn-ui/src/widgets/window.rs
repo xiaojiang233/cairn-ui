@@ -18,6 +18,7 @@ use crate::{Align, Direction, El, Justify, Painter, Point, PointerButton, Rect, 
 pub struct DragArea<S: 'static> {
     pub(crate) style: Style,
     pub(crate) key: Option<u64>,
+    pub(crate) maximizable: bool,
     children: Vec<El<S>>,
 }
 
@@ -29,11 +30,17 @@ pub fn drag_area<S: 'static>() -> DragArea<S> {
             ..Style::default()
         },
         key: None,
+        maximizable: true,
         children: Vec::new(),
     }
 }
 
 impl<S: 'static> DragArea<S> {
+    pub fn maximizable(mut self, maximizable: bool) -> Self {
+        self.maximizable = maximizable;
+        self
+    }
+
     pub fn child(mut self, child: impl Into<El<S>>) -> Self {
         self.children.push(child.into());
         self
@@ -78,7 +85,8 @@ impl<S: 'static> From<DragArea<S>> for El<S> {
 }
 
 impl<S: 'static> Widget<S> for DragArea<S> {
-    fn update(&mut self, _cx: &mut LayoutCx, _new: Self) -> Change {
+    fn update(&mut self, _cx: &mut LayoutCx, new: Self) -> Change {
+        self.maximizable = new.maximizable;
         Change::NONE
     }
 
@@ -93,7 +101,7 @@ impl<S: 'static> Widget<S> for DragArea<S> {
             ..
         } = event
         {
-            if *count >= 2 {
+            if *count >= 2 && self.maximizable {
                 cx.toggle_maximize_window();
             } else {
                 cx.drag_window();
@@ -116,7 +124,8 @@ impl<S: 'static> Widget<S> for DragArea<S> {
 pub struct WindowControls {
     pub(crate) style: Style,
     pub(crate) key: Option<u64>,
-    /// 指针下的按钮、按下的按钮（0 最小化，1 最大化 / 还原，2 关闭）。
+    pub(crate) maximizable: bool,
+    /// 指针下的按钮、按下的按钮（0 最小化，1 最大化 / 还原，2 关闭；不含最大化时 0 最小化，1 关闭）。
     hovered: Option<usize>,
     pressed: Option<usize>,
     fade: [Transition; 3],
@@ -126,6 +135,7 @@ pub fn window_controls() -> WindowControls {
     WindowControls {
         style: Style::default(),
         key: None,
+        maximizable: true,
         hovered: None,
         pressed: None,
         fade: Default::default(),
@@ -135,22 +145,38 @@ pub fn window_controls() -> WindowControls {
 element!(WindowControls);
 
 impl WindowControls {
+    pub fn maximizable(mut self, maximizable: bool) -> Self {
+        self.maximizable = maximizable;
+        self
+    }
+
+    pub fn without_maximize(mut self) -> Self {
+        self.maximizable = false;
+        self
+    }
+
+    fn button_count(&self) -> usize {
+        if self.maximizable { 3 } else { 2 }
+    }
+
     fn index_at(&self, bounds: Rect, pos: Point, theme: &Theme) -> Option<usize> {
         if !bounds.contains(pos) {
             return None;
         }
-        Some((((pos.x - bounds.x) / theme.caption.width) as usize).min(2))
+        let max_idx = self.button_count() - 1;
+        Some((((pos.x - bounds.x) / theme.caption.width) as usize).min(max_idx))
     }
 }
 
 impl<S: 'static> Widget<S> for WindowControls {
-    fn update(&mut self, _cx: &mut LayoutCx, _new: Self) -> Change {
+    fn update(&mut self, _cx: &mut LayoutCx, new: Self) -> Change {
+        self.maximizable = new.maximizable;
         Change::NONE
     }
 
     fn measure(&mut self, cx: &mut LayoutCx, _input: &MeasureInput) -> Size {
         let c = &cx.theme().caption;
-        Size::new(c.width * 3.0, c.height)
+        Size::new(c.width * self.button_count() as f32, c.height)
     }
 
     fn animate(&mut self, cx: &mut PaintCx) {
@@ -165,20 +191,25 @@ impl<S: 'static> Widget<S> for WindowControls {
         let theme = cx.theme();
         let c = &theme.caption;
         let b = cx.bounds();
-        let icons = [
-            Icon::WindowMinimize,
-            if cx.window_maximized() {
-                Icon::WindowRestore
-            } else {
-                Icon::WindowMaximize
-            },
-            Icon::Close,
-        ];
-        for (i, icon) in icons.into_iter().enumerate() {
+        let icons: &[Icon] = if self.maximizable {
+            &[
+                Icon::WindowMinimize,
+                if cx.window_maximized() {
+                    Icon::WindowRestore
+                } else {
+                    Icon::WindowMaximize
+                },
+                Icon::Close,
+            ]
+        } else {
+            &[Icon::WindowMinimize, Icon::Close]
+        };
+        let last_idx = icons.len() - 1;
+        for (i, &icon) in icons.iter().enumerate() {
             let cell = Rect::new(b.x + c.width * i as f32, b.y, c.width, c.height);
             let h = self.fade[i].value(cx.now());
             let pressed = self.pressed == Some(i) && self.hovered == Some(i);
-            let (fill, fill_pressed, icon_hover) = if i == 2 {
+            let (fill, fill_pressed, icon_hover) = if i == last_idx {
                 (c.close_fill_hover, c.close_fill_pressed, c.close_icon_hover)
             } else {
                 (c.fill_hover, c.fill_pressed, c.icon_hover)
@@ -226,10 +257,17 @@ impl<S: 'static> Widget<S> for WindowControls {
                 if target.is_some() && target == self.index_at(cx.bounds(), *pos, theme) {
                     // 最小化 / 最大化之后指针多半已经不在按钮上，先清掉悬停，等下一次移动再算。
                     self.hovered = None;
-                    match target {
-                        Some(0) => cx.minimize_window(),
-                        Some(1) => cx.toggle_maximize_window(),
-                        _ => cx.close_window(),
+                    if self.maximizable {
+                        match target {
+                            Some(0) => cx.minimize_window(),
+                            Some(1) => cx.toggle_maximize_window(),
+                            _ => cx.close_window(),
+                        }
+                    } else {
+                        match target {
+                            Some(0) => cx.minimize_window(),
+                            _ => cx.close_window(),
+                        }
                     }
                 }
             }

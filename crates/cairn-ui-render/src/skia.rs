@@ -1119,7 +1119,8 @@ impl Painter for SkiaPainter<'_> {
         let lut = coverage_lut(color);
         for run in text.buffer.layout_runs() {
             for glyph in run.glyphs.iter() {
-                let pg = glyph.physical((ox, oy + run.line_y * k), k);
+                let mut pg = glyph.physical((ox, oy + run.line_y * k), k);
+                pg.cache_key.flags |= cosmic_text::CacheKeyFlags::DISABLE_HINTING;
                 let Some(image) = ts.glyphs.get_image(&mut ts.fonts, pg.cache_key) else {
                     continue;
                 };

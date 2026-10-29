@@ -317,6 +317,8 @@ pub struct Motion {
     pub enter: Duration,
     pub exit: Duration,
     pub enter_offset: f32,
+    /// 展开 / 收起（[`crate::collapse`]）：高度长到完整高度的时长，收起是它的 75%。
+    pub expand: Duration,
     pub easing: Easing,
     pub press_easing: Easing,
 }
@@ -332,6 +334,7 @@ impl Motion {
             progress: Duration::ZERO,
             enter: Duration::ZERO,
             exit: Duration::ZERO,
+            expand: Duration::ZERO,
             ..self
         }
     }
@@ -639,6 +642,7 @@ impl Theme {
                 enter: Duration::ZERO,
                 exit: Duration::ZERO,
                 enter_offset: 0.0,
+                expand: Duration::ZERO,
                 easing: Easing::EaseOut,
                 press_easing: Easing::EaseOut,
             },
@@ -912,6 +916,7 @@ impl Theme {
                 enter: Duration::from_millis(420),
                 exit: Duration::from_millis(180),
                 enter_offset: 14.0,
+                expand: Duration::from_millis(240),
                 easing: Easing::SMOOTH,
                 press_easing: Easing::EaseOut,
             },

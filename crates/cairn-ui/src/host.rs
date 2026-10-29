@@ -21,6 +21,9 @@ pub(crate) trait Host {
     fn minimize_window(&mut self);
     fn toggle_maximize_window(&mut self);
     fn is_window_maximized(&self) -> bool;
+    fn is_window_maximizable(&self) -> bool {
+        true
+    }
 }
 
 /// 真实窗口。
@@ -69,13 +72,16 @@ impl Host for PlatformHost<'_, '_> {
     fn is_window_maximized(&self) -> bool {
         self.0.is_maximized()
     }
+    fn is_window_maximizable(&self) -> bool {
+        self.0.is_maximizable()
+    }
 }
 
 /// 测试里假定的显示器刷新间隔（60 Hz）。
 pub(crate) const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
 
 /// 不连窗口的宿主：把请求记下来，供测试检查。
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct RecordingHost {
     pub clipboard: Option<String>,
     pub cursor: CursorIcon,
@@ -88,6 +94,26 @@ pub(crate) struct RecordingHost {
     pub resize_requested: Option<ResizeEdge>,
     pub minimized: bool,
     pub maximized: bool,
+    pub maximizable: bool,
+}
+
+impl Default for RecordingHost {
+    fn default() -> Self {
+        RecordingHost {
+            clipboard: None,
+            cursor: CursorIcon::Default,
+            ime_allowed: false,
+            ime_area: None,
+            redraw_requested: false,
+            wakeup: None,
+            exit_requested: false,
+            drag_requested: false,
+            resize_requested: None,
+            minimized: false,
+            maximized: false,
+            maximizable: true,
+        }
+    }
 }
 
 impl Host for RecordingHost {
@@ -135,5 +161,8 @@ impl Host for RecordingHost {
     }
     fn is_window_maximized(&self) -> bool {
         self.maximized
+    }
+    fn is_window_maximizable(&self) -> bool {
+        self.maximizable
     }
 }

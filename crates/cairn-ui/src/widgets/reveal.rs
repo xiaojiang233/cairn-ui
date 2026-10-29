@@ -1,5 +1,7 @@
 //! 出现与离开带过渡的容器 [`reveal`]，以及透明的可点击区域 [`click_area`]。
 
+use std::time::Duration;
+
 use crate::anim::{Easing, Transition};
 use crate::theme::Theme;
 use crate::widget::{Change, Event, EventCx, LayoutCx, PaintCx, Role, Semantics, Widget};
@@ -15,6 +17,10 @@ enum Side {
     Below,
     /// 从上方落下（下拉的弹出框）。
     Above,
+    /// 从左边滑入。
+    Left,
+    /// 从右边滑入。
+    Right,
 }
 
 /// 出现时淡入并滑到位、离开时淡出的容器。用 [`reveal`] 创建，子元素纵向排列、横向拉伸。
@@ -33,6 +39,10 @@ pub struct Reveal<S: 'static> {
     from: Side,
     leaving: bool,
     on_left: Option<Callback<S>>,
+    custom_enter: Option<Duration>,
+    custom_exit: Option<Duration>,
+    custom_offset: Option<f32>,
+    clip: bool,
     t: Transition,
     notified: bool,
     /// 上一帧还在动画中（决定要不要用合成层缓存）。
@@ -51,6 +61,10 @@ pub fn reveal<S: 'static>() -> Reveal<S> {
         from: Side::Below,
         leaving: false,
         on_left: None,
+        custom_enter: None,
+        custom_exit: None,
+        custom_offset: None,
+        clip: false,
         t: Transition::default(),
         notified: false,
         moving: false,
@@ -74,6 +88,47 @@ impl<S: 'static> Reveal<S> {
         self
     }
 
+    /// 从左侧滑入。
+    pub fn from_left(mut self) -> Self {
+        self.from = Side::Left;
+        self
+    }
+
+    /// 从右侧滑入。
+    pub fn from_right(mut self) -> Self {
+        self.from = Side::Right;
+        self
+    }
+
+    /// 自定义出现动画时长。
+    pub fn duration(mut self, d: Duration) -> Self {
+        self.custom_enter = Some(d);
+        self
+    }
+
+    /// 自定义离开动画时长。
+    pub fn exit_duration(mut self, d: Duration) -> Self {
+        self.custom_exit = Some(d);
+        self
+    }
+
+    /// 自定义平移位移（逻辑像素；0 表示纯淡入淡出，不位移）。
+    pub fn offset(mut self, offset: f32) -> Self {
+        self.custom_offset = Some(offset);
+        self
+    }
+
+    /// 纯淡入淡出，不带位移。
+    pub fn fade(self) -> Self {
+        self.offset(0.0)
+    }
+
+    /// 是否将子元素裁剪在容器矩形范围内（页面切换时防止滑动溢出）。
+    pub fn clip(mut self, clip: bool) -> Self {
+        self.clip = clip;
+        self
+    }
+
     /// 开始（或取消）离开。
     pub fn leaving(mut self, leaving: bool) -> Self {
         self.leaving = leaving;
@@ -84,13 +139,6 @@ impl<S: 'static> Reveal<S> {
     pub fn on_left(mut self, f: impl Fn(&mut S) + 'static) -> Self {
         self.on_left = Some(Box::new(f));
         self
-    }
-
-    fn sign(&self) -> f32 {
-        match self.from {
-            Side::Below => 1.0,
-            Side::Above => -1.0,
-        }
     }
 }
 
@@ -118,23 +166,31 @@ impl<S: 'static> From<Reveal<S>> for El<S> {
 
 impl<S: 'static> Widget<S> for Reveal<S> {
     fn update(&mut self, _cx: &mut LayoutCx, new: Self) -> Change {
-        let change = if new.leaving != self.leaving {
+        let mut change = Change::NONE;
+        if new.leaving != self.leaving {
             self.notified = false;
-            Change::PAINT
-        } else {
-            Change::NONE
-        };
+            change |= Change::PAINT;
+        }
+        if new.clip != self.clip {
+            change |= Change::PAINT;
+        }
         self.leaving = new.leaving;
         self.from = new.from;
         self.on_left = new.on_left;
+        self.custom_enter = new.custom_enter;
+        self.custom_exit = new.custom_exit;
+        self.custom_offset = new.custom_offset;
+        self.clip = new.clip;
         change
     }
 
     fn visual_bounds(&self, bounds: Rect, theme: &Theme) -> Rect {
-        let d = theme.motion.enter_offset.abs();
+        let d = self.custom_offset.unwrap_or(theme.motion.enter_offset).abs();
         match self.from {
             Side::Below => bounds.outset(0.0, 0.0, d, 0.0),
             Side::Above => bounds.outset(d, 0.0, 0.0, 0.0),
+            Side::Left => bounds.outset(0.0, 0.0, 0.0, d),
+            Side::Right => bounds.outset(0.0, d, 0.0, 0.0),
         }
     }
 
@@ -142,9 +198,9 @@ impl<S: 'static> Widget<S> for Reveal<S> {
         let m = cx.theme().motion;
         let now = cx.now();
         let (target, duration, easing) = if self.leaving {
-            (0.0, m.exit, Easing::EaseOut)
+            (0.0, self.custom_exit.unwrap_or(m.exit), Easing::EaseOut)
         } else {
-            (1.0, m.enter, m.easing)
+            (1.0, self.custom_enter.unwrap_or(m.enter), m.easing)
         };
         self.t.animate_to(target, now, duration, easing);
         self.moving = self.t.is_animating(now);
@@ -161,9 +217,18 @@ impl<S: 'static> Widget<S> for Reveal<S> {
         if k >= 1.0 {
             return Affine::IDENTITY;
         }
-        // 只平移不缩放：尺寸始终不变，合成层缓存的位图可以按整像素直接贴上去，不用重新采样。
         let m = cx.theme().motion;
-        Affine::translate(0.0, self.sign() * m.enter_offset * (1.0 - k))
+        let offset = self.custom_offset.unwrap_or(m.enter_offset);
+        if offset.abs() < 1e-4 {
+            return Affine::IDENTITY;
+        }
+        let dist = (1.0 - k) * offset;
+        match self.from {
+            Side::Below => Affine::translate(0.0, dist),
+            Side::Above => Affine::translate(0.0, -dist),
+            Side::Left => Affine::translate(-dist, 0.0),
+            Side::Right => Affine::translate(dist, 0.0),
+        }
     }
 
     fn opacity(&self, cx: &PaintCx) -> f32 {
@@ -187,6 +252,14 @@ impl<S: 'static> Widget<S> for Reveal<S> {
 
     fn intercepts_pointer(&self, _pos: Point, _bounds: Rect, _theme: &Theme) -> bool {
         self.leaving
+    }
+
+    fn clip_children(&self, _theme: &Theme) -> Option<f32> {
+        if self.clip {
+            Some(0.0)
+        } else {
+            None
+        }
     }
 
     fn semantics(&self) -> Semantics {
