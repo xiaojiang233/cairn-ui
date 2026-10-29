@@ -938,7 +938,7 @@ fn paint_node<S: 'static>(st: &mut PaintState<S>, id: WidgetId, p: &mut dyn Pain
         return;
     }
     // 有合成层缓存：贴上缓存的位图，不再画子树。
-    if !caching && let Some(cache) = st.layer_cache.get(&id) {
+    if !caching && node.widget.cache_layer() && let Some(cache) = st.layer_cache.get(&id) {
         if transformed {
             p.push_transform(transform);
         }

@@ -203,8 +203,9 @@ impl<S: 'static> Widget<S> for Reveal<S> {
             (1.0, self.custom_enter.unwrap_or(m.enter), m.easing)
         };
         self.t.animate_to(target, now, duration, easing);
+        let was_moving = self.moving;
         self.moving = self.t.is_animating(now);
-        if self.moving {
+        if self.moving || was_moving {
             cx.request_frame();
         } else if self.leaving && !self.notified {
             self.notified = true;
