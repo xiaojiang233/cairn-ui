@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use cairn_ui_platform::{Context, CursorIcon, PixelRect};
+use cairn_ui_platform::{Context, CursorIcon, PixelRect, ResizeEdge};
 
 pub(crate) trait Host {
     fn clipboard_get(&mut self) -> Option<String>;
@@ -15,6 +15,15 @@ pub(crate) trait Host {
     /// 动画帧间隔（显示器刷新间隔）。
     fn frame_interval(&self) -> Duration;
     fn exit(&mut self);
+    /// 无边框窗口自己处理的窗口操作。
+    fn drag_window(&mut self);
+    fn drag_resize_window(&mut self, edge: ResizeEdge);
+    fn minimize_window(&mut self);
+    fn toggle_maximize_window(&mut self);
+    fn is_window_maximized(&self) -> bool;
+    fn is_window_maximizable(&self) -> bool {
+        true
+    }
 }
 
 /// 真实窗口。
@@ -48,13 +57,31 @@ impl Host for PlatformHost<'_, '_> {
     fn exit(&mut self) {
         self.0.exit();
     }
+    fn drag_window(&mut self) {
+        self.0.drag_window();
+    }
+    fn drag_resize_window(&mut self, edge: ResizeEdge) {
+        self.0.drag_resize_window(edge);
+    }
+    fn minimize_window(&mut self) {
+        self.0.minimize();
+    }
+    fn toggle_maximize_window(&mut self) {
+        self.0.toggle_maximize();
+    }
+    fn is_window_maximized(&self) -> bool {
+        self.0.is_maximized()
+    }
+    fn is_window_maximizable(&self) -> bool {
+        self.0.is_maximizable()
+    }
 }
 
 /// 测试里假定的显示器刷新间隔（60 Hz）。
 pub(crate) const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
 
 /// 不连窗口的宿主：把请求记下来，供测试检查。
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct RecordingHost {
     pub clipboard: Option<String>,
     pub cursor: CursorIcon,
@@ -63,6 +90,30 @@ pub(crate) struct RecordingHost {
     pub redraw_requested: bool,
     pub wakeup: Option<Instant>,
     pub exit_requested: bool,
+    pub drag_requested: bool,
+    pub resize_requested: Option<ResizeEdge>,
+    pub minimized: bool,
+    pub maximized: bool,
+    pub maximizable: bool,
+}
+
+impl Default for RecordingHost {
+    fn default() -> Self {
+        RecordingHost {
+            clipboard: None,
+            cursor: CursorIcon::Default,
+            ime_allowed: false,
+            ime_area: None,
+            redraw_requested: false,
+            wakeup: None,
+            exit_requested: false,
+            drag_requested: false,
+            resize_requested: None,
+            minimized: false,
+            maximized: false,
+            maximizable: true,
+        }
+    }
 }
 
 impl Host for RecordingHost {
@@ -95,5 +146,23 @@ impl Host for RecordingHost {
     }
     fn exit(&mut self) {
         self.exit_requested = true;
+    }
+    fn drag_window(&mut self) {
+        self.drag_requested = true;
+    }
+    fn drag_resize_window(&mut self, edge: ResizeEdge) {
+        self.resize_requested = Some(edge);
+    }
+    fn minimize_window(&mut self) {
+        self.minimized = true;
+    }
+    fn toggle_maximize_window(&mut self) {
+        self.maximized = !self.maximized;
+    }
+    fn is_window_maximized(&self) -> bool {
+        self.maximized
+    }
+    fn is_window_maximizable(&self) -> bool {
+        self.maximizable
     }
 }

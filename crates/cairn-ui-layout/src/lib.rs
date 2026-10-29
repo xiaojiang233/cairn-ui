@@ -136,6 +136,10 @@ pub struct Style {
     pub justify: Justify,
     pub grow: f32,
     pub shrink: f32,
+    /// 绝对定位（`position: absolute`）：不参与父节点的排列，按 `inset` 相对父节点的内边距盒定位。
+    pub absolute: bool,
+    /// 绝对定位时与父节点各边的距离：上、右、下、左。`Auto` 表示这一边不约束。
+    pub inset: [Length; 4],
 }
 
 impl Default for Style {
@@ -158,6 +162,8 @@ impl Default for Style {
             justify: Justify::Start,
             grow: 0.0,
             shrink: 1.0,
+            absolute: false,
+            inset: [Length::Auto; 4],
         }
     }
 }
@@ -246,6 +252,17 @@ fn to_taffy(s: &Style) -> taffy::Style {
         flex_grow: s.grow,
         flex_shrink: s.shrink,
         flex_basis: taffy::Dimension::AUTO,
+        position: if s.absolute {
+            taffy::Position::Absolute
+        } else {
+            taffy::Position::Relative
+        },
+        inset: taffy::Rect {
+            top: lpa(s.inset[0]),
+            right: lpa(s.inset[1]),
+            bottom: lpa(s.inset[2]),
+            left: lpa(s.inset[3]),
+        },
         ..taffy::Style::default()
     }
 }

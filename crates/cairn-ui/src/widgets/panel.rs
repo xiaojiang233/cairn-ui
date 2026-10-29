@@ -29,6 +29,8 @@ pub struct Panel<S: 'static> {
     horizontal: bool,
     align: Option<Align>,
     hover_effect: bool,
+    bar: bool,
+    popover: bool,
     hover: Transition,
 }
 
@@ -45,6 +47,8 @@ pub fn panel<S: 'static>() -> Panel<S> {
         horizontal: false,
         align: None,
         hover_effect: true,
+        bar: false,
+        popover: false,
         hover: Transition::default(),
     }
 }
@@ -84,10 +88,37 @@ impl<S: 'static> Panel<S> {
         self
     }
 
+    /// 浮动工具栏外观：取主题的 [`Theme::bar`] 与 `radius.bar`（Nocturne 下没有边框、圆角更大），
+    /// 例如贴着窗口底部的程序坞。
+    pub fn bar(mut self) -> Self {
+        self.bar = true;
+        self
+    }
+
+    /// 弹出框外观：取主题的 [`Theme::popover`]（更不透明、阴影更重），圆角同普通面板。
+    /// 悬停效果默认关闭。
+    pub fn popover(mut self) -> Self {
+        self.popover = true;
+        self.hover_effect = false;
+        self
+    }
+
     /// 悬停时是否上浮、加亮填充与边框、加深阴影，默认开启。
     pub fn hover_effect(mut self, enabled: bool) -> Self {
         self.hover_effect = enabled;
         self
+    }
+}
+
+impl<S: 'static> Panel<S> {
+    fn look<'t>(&self, theme: &'t Theme) -> &'t crate::PanelStyle {
+        if self.bar {
+            &theme.bar
+        } else if self.popover {
+            &theme.popover
+        } else {
+            &theme.panel
+        }
     }
 }
 
@@ -123,12 +154,14 @@ impl<S: 'static> From<Panel<S>> for El<S> {
 impl<S: 'static> Widget<S> for Panel<S> {
     fn update(&mut self, _cx: &mut LayoutCx, new: Self) -> Change {
         // 子元素、样式、key 已经由元素树处理，这里只剩自己的属性。
-        let change = if new.hover_effect != self.hover_effect {
+        let change = if new.hover_effect != self.hover_effect || new.bar != self.bar || new.popover != self.popover {
             Change::PAINT
         } else {
             Change::NONE
         };
         self.hover_effect = new.hover_effect;
+        self.bar = new.bar;
+        self.popover = new.popover;
         change
     }
 
@@ -142,7 +175,7 @@ impl<S: 'static> Widget<S> for Panel<S> {
     }
 
     fn visual_bounds(&self, bounds: Rect, theme: &Theme) -> Rect {
-        let look = &theme.panel;
+        let look = self.look(theme);
         // 悬停时阴影会换成 `shadow_hover`，面板整体上浮 `lift`（向上多出一截）。
         let (e, lift) = if self.hover_effect {
             (max_extent(&look.shadow, &look.shadow_hover), look.lift)
@@ -159,7 +192,7 @@ impl<S: 'static> Widget<S> for Panel<S> {
     }
 
     fn transform(&self, cx: &PaintCx) -> Affine {
-        let up = cx.theme().panel.lift * self.hover.value(cx.now());
+        let up = self.look(cx.theme()).lift * self.hover.value(cx.now());
         if up.abs() > 1e-4 {
             Affine::translate(0.0, -up)
         } else {
@@ -169,9 +202,10 @@ impl<S: 'static> Widget<S> for Panel<S> {
 
     fn paint(&mut self, cx: &mut PaintCx, p: &mut dyn Painter) {
         let theme = cx.theme();
-        let look = &theme.panel;
+        let look = self.look(theme);
         let h = self.hover.value(cx.now());
-        let (b, r) = (cx.bounds(), theme.radius.panel);
+        let r = if self.bar { theme.radius.bar } else { theme.radius.panel };
+        let b = cx.bounds();
         let hair = p.hairline();
 
         // 1. 外阴影（只在面板外面）

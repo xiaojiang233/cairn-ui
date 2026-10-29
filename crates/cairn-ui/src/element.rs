@@ -108,6 +108,40 @@ pub trait Styled: Sized {
         self
     }
 
+    /// 空间不够时在主轴方向上收缩的权重，默认 1；0 表示不收缩（例如固定高度的标题栏）。
+    fn shrink(mut self, weight: f32) -> Self {
+        self.style_mut().shrink = weight;
+        self
+    }
+
+    /// 绝对定位：不参与父容器的排列，用 [`Styled::top`]、[`Styled::right`]、[`Styled::bottom`]、
+    /// [`Styled::left`] 相对父容器定位。后面的兄弟元素画在上面、先接收点击，所以浮层通常放在最后。
+    fn absolute(mut self) -> Self {
+        self.style_mut().absolute = true;
+        self
+    }
+
+    /// 绝对定位时与父容器上边的距离。
+    fn top(mut self, v: f32) -> Self {
+        self.style_mut().inset[0] = Length::Px(v);
+        self
+    }
+
+    fn right(mut self, v: f32) -> Self {
+        self.style_mut().inset[1] = Length::Px(v);
+        self
+    }
+
+    fn bottom(mut self, v: f32) -> Self {
+        self.style_mut().inset[2] = Length::Px(v);
+        self
+    }
+
+    fn left(mut self, v: f32) -> Self {
+        self.style_mut().inset[3] = Length::Px(v);
+        self
+    }
+
     /// 内边距。传一个数字表示四边相同，或传 [`Insets`]。
     fn padding(mut self, p: impl Into<Insets>) -> Self {
         self.style_mut().padding = p.into();

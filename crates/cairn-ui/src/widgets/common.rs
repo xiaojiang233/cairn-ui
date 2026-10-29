@@ -63,6 +63,24 @@ pub(crate) fn drive(t: &mut Transition, cx: &mut PaintCx, on: bool, duration: Du
     }
 }
 
+/// 与 [`drive`] 相同，但控件第一次绘制时直接停在目标上：创建时就已选中 / 勾选的控件不该播一遍
+/// “变成选中”的过渡。`started` 是控件自己保存的“画过了”标记。
+pub(crate) fn drive_state(
+    t: &mut Transition,
+    cx: &mut PaintCx,
+    on: bool,
+    duration: Duration,
+    easing: Easing,
+    started: &mut bool,
+) {
+    if !*started {
+        *started = true;
+        t.set(if on { 1.0 } else { 0.0 });
+        return;
+    }
+    drive(t, cx, on, duration, easing);
+}
+
 /// 悬停、按下、键盘焦点三个过渡。
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Interaction {

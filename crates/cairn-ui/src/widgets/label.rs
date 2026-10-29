@@ -29,6 +29,9 @@ pub struct Label {
     layout: Option<TextLayout>,
     /// 不换行时的宽度。
     natural_width: f32,
+    truncate: bool,
+    /// 放不下时显示的“前缀 + …”，以及它是按哪个宽度算的。
+    elided: Option<(f32, TextLayout)>,
 }
 
 pub fn label(text: impl Into<String>) -> Label {
@@ -42,6 +45,8 @@ pub fn label(text: impl Into<String>) -> Label {
         color: None,
         layout: None,
         natural_width: 0.0,
+        truncate: false,
+        elided: None,
     }
 }
 
@@ -51,6 +56,12 @@ impl Label {
     /// 文字层级，决定默认的字号、字重和颜色。
     pub fn role(mut self, role: TextRole) -> Self {
         self.role = role;
+        self
+    }
+
+    /// 只显示一行：放不下时截断并以“…”结尾，不换行。可以被布局压缩到很窄（最小宽度为 0）。
+    pub fn truncate(mut self) -> Self {
+        self.truncate = true;
         self
     }
 
@@ -137,6 +148,42 @@ impl Label {
         layout
     }
 
+    /// 单行截断：宽度放不下整行时，二分查找能放下“前缀 + …”的最长前缀。同一宽度只算一次。
+    fn elide(&mut self, cx: &mut LayoutCx, width: f32) {
+        if width + 0.5 >= self.natural_width {
+            self.elided = None;
+            return;
+        }
+        if self.elided.as_ref().is_some_and(|(w, _)| (*w - width).abs() < 0.25) {
+            return;
+        }
+        let style = self.text_style(cx.theme());
+        let bounds: Vec<usize> = self
+            .text
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain([self.text.len()])
+            .collect();
+        let fits = |n: usize, cx: &mut LayoutCx| {
+            let s = format!("{}…", self.text[..bounds[n]].trim_end());
+            let l = TextLayout::new(cx.text(), &s, &style);
+            (l.size().width <= width, l)
+        };
+        let (mut lo, mut hi) = (0usize, bounds.len() - 1);
+        let mut best = fits(0, cx).1;
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            match fits(mid, cx) {
+                (true, l) => {
+                    lo = mid;
+                    best = l;
+                }
+                (false, _) => hi = mid - 1,
+            }
+        }
+        self.elided = Some((width, best));
+    }
+
     /// 宽度不够放下整行时才换行；留一点余量，避免浮点误差导致恰好放得下的文字被折行。
     fn wrap_for(&self, width: f32) -> Option<f32> {
         (width + 0.5 < self.natural_width).then_some(width)
@@ -150,9 +197,12 @@ impl<S: 'static> Widget<S> for Label {
             || new.role != self.role
             || new.font_size != self.font_size
             || new.weight != self.weight
+            || new.truncate != self.truncate
         {
             change = Change::LAYOUT;
+            self.elided = None;
         }
+        self.truncate = new.truncate;
         if new.color != self.color {
             change |= Change::PAINT;
         }
@@ -166,6 +216,16 @@ impl<S: 'static> Widget<S> for Label {
 
     fn measure(&mut self, cx: &mut LayoutCx, input: &MeasureInput) -> Size {
         self.sync(cx);
+        if self.truncate {
+            let natural = self.natural_width;
+            let h = self.layout.as_ref().map(|l| l.size().height).unwrap_or_default();
+            let w = match input.available_width {
+                AvailableSpace::Definite(w) => natural.min(w),
+                AvailableSpace::MinContent => 0.0,
+                AvailableSpace::MaxContent => natural,
+            };
+            return Size::new(w, h);
+        }
         let wrap = match input.available_width {
             AvailableSpace::Definite(w) => self.wrap_for(w),
             AvailableSpace::MinContent => Some(0.0),
@@ -177,6 +237,10 @@ impl<S: 'static> Widget<S> for Label {
     }
 
     fn arrange(&mut self, cx: &mut LayoutCx, _bounds: Rect, content: Rect) {
+        if self.truncate {
+            self.elide(cx, content.width);
+            return;
+        }
         let wrap = self.wrap_for(content.width);
         if let Some(layout) = &mut self.layout {
             layout.set_wrap_width(cx.text(), wrap);
@@ -184,7 +248,9 @@ impl<S: 'static> Widget<S> for Label {
     }
 
     fn paint(&mut self, cx: &mut PaintCx, p: &mut dyn Painter) {
-        if let Some(layout) = &self.layout {
+        if let Some((_, elided)) = &self.elided {
+            p.draw_text(elided, cx.content().origin(), self.type_style(cx.theme()).color);
+        } else if let Some(layout) = &self.layout {
             p.draw_text(layout, cx.content().origin(), self.type_style(cx.theme()).color);
         }
     }

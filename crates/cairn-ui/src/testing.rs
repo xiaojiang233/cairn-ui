@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use cairn_ui_platform::{self as platform, ImeEvent, Key, KeyEvent, Modifiers, PixelRect, PointerButton};
+use cairn_ui_platform::{self as platform, ImeEvent, Key, KeyEvent, Modifiers, PixelRect, PointerButton, ScrollDelta};
 
 use crate::app::{ViewFn, erase_view, system_fonts};
 use crate::host::{FRAME_INTERVAL, RecordingHost};
@@ -189,11 +189,27 @@ impl<S: 'static> Headless<S> {
         self.send(platform::Event::PointerButton { button, pressed });
     }
 
+    /// 是否请求过关闭窗口（[`crate::EventCx::close_window`]）。
+    pub fn exit_requested(&self) -> bool {
+        self.host.exit_requested
+    }
+
+    /// 窗口是否处于最大化（模拟：最大化按钮在假宿主上切换这个状态）、是否请求过最小化。
+    pub fn window_state(&self) -> (bool, bool) {
+        (self.host.maximized, self.host.minimized)
+    }
+
     /// 移动到 `p` 并单击左键。
     pub fn click(&mut self, p: Point) {
         self.pointer_move(p);
         self.pointer_button(PointerButton::Left, true);
         self.pointer_button(PointerButton::Left, false);
+    }
+
+    /// 滚轮（作用在指针当前悬停的控件上，未处理就冒泡）。`Lines` 的 `y` 为正是向上滚，与 winit 一致；
+    /// `Pixels` 是物理像素。
+    pub fn wheel(&mut self, delta: ScrollDelta) {
+        self.send(platform::Event::Wheel(delta));
     }
 
     pub fn set_modifiers(&mut self, m: Modifiers) {

@@ -1,4 +1,4 @@
-//! Windows 实现：剪贴板、光标闪烁、双击参数、动画开关、字体目录、默认字体。
+//! Windows 实现：剪贴板、光标闪烁、双击参数、动画开关、字体目录、默认字体、无边框窗口的阴影与圆角。
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -13,8 +13,9 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetCaretBlinkTime, GetSystemMetrics, SM_CXDOUBLECLK, SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
 };
+use winit::platform::windows::{CornerPreference, WindowAttributesExtWindows};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use winit::window::Window;
+use winit::window::{Window, WindowAttributes};
 
 use crate::FontFamilies;
 
@@ -169,4 +170,11 @@ pub(crate) fn default_font_families(locale: &str) -> FontFamilies {
         serif: list(serif),
         monospace: list(&["Cascadia Mono", "Consolas", "Courier New"]),
     }
+}
+
+/// 无边框窗口：保留系统投影，Windows 11 上用系统圆角（更早的系统忽略圆角设置）。
+pub(crate) fn undecorated(attrs: WindowAttributes) -> WindowAttributes {
+    attrs
+        .with_undecorated_shadow(true)
+        .with_corner_preference(CornerPreference::Round)
 }

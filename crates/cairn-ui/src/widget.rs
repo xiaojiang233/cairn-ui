@@ -102,6 +102,12 @@ pub enum Role {
     Button,
     TextInput,
     Slider,
+    /// 滚动容器（[`crate::scroll`]）。
+    ScrollArea,
+    Checkbox,
+    Tab,
+    ProgressBar,
+    ListItem,
 }
 
 /// 控件的语义信息，用于以后接入无障碍接口，也方便测试里按文字查找控件。
@@ -138,6 +144,22 @@ pub trait Widget<S: 'static>: Any {
     /// 每次布局完成后调用，告知最终的边框盒与内容区（窗口坐标）。
     fn arrange(&mut self, _cx: &mut LayoutCx, _bounds: Rect, _content: Rect) {}
 
+    /// 紧接在 [`Widget::arrange`] 之后、子元素定位之前调用（只对有子元素的控件）：告知子元素占据的范围，
+    /// 供滚动容器据此限制滚动量。
+    ///
+    /// `content_size` 是从本控件边框盒左上角算起的范围，与 CSS 的 `scrollWidth` / `scrollHeight` 相同：
+    /// 每个可见子元素的“布局位置 + 尺寸 + 右 / 下外边距”的最大值，再加上本控件自己的右 / 下内边距。
+    /// 窗口尺寸或内容变化后都会重新调用。
+    fn arrange_content(&mut self, _cx: &mut LayoutCx, _content_size: Size) {}
+
+    /// 所有子元素的整体平移量：子元素的窗口位置 = 布局位置 − 这个值。滚动容器返回当前的滚动量。
+    ///
+    /// 这平移的是子元素**真实的**边框盒，不是只改绘制：命中测试、事件坐标、输入法候选框、焦点框和脏区
+    /// 因此始终一致。滚动量改变后用 [`EventCx::request_arrange`] 通知框架重新定位子元素。
+    fn child_offset(&self) -> Point {
+        Point::ZERO
+    }
+
     /// 本控件在任何状态下可能画到的范围（窗口坐标）：阴影、外发光、焦点框、悬停上浮都要算进去。
     /// 用于计算脏区和跳过画不到的控件。默认是边框盒（框架另外留了 4 像素余量给抗锯齿和焦点框）。
     fn visual_bounds(&self, bounds: Rect, _theme: &Theme) -> Rect {
@@ -158,9 +180,38 @@ pub trait Widget<S: 'static>: Any {
         Affine::IDENTITY
     }
 
+    /// 本控件及其子元素整体的不透明度（0–1），用于淡入淡出，默认 1。小于 1 时整棵子树先画进离屏图层、
+    /// 再按这个值混合，叠在一起的子元素不会互相透出。只影响绘制，不影响布局和点击判定。
+    /// 只读取 [`Widget::animate`] 已经更新过的过渡值。
+    fn opacity(&self, _cx: &PaintCx) -> f32 {
+        1.0
+    }
+
+    /// 返回 `true` 时，本控件及其子树被画成一张位图缓存起来，之后的帧只把这张位图按
+    /// [`Widget::transform`]、[`Widget::opacity`] 合成上去，不再重画里面的内容——
+    /// 整块面板淡入、滑入这类大面积动画因此每帧只需一次贴图。
+    /// 子树内容有任何变化（状态更新、重绘请求、换主题）时缓存自动重画。只应在动画进行时返回 `true`，
+    /// 静止时缓存的意义不大，还会占内存。
+    fn cache_layer(&self) -> bool {
+        false
+    }
+
     /// 返回 `Some(圆角半径)` 时，子元素被裁剪到本控件的边框盒内（绘制和点击判定都是）。
     fn clip_children(&self, _theme: &Theme) -> Option<f32> {
         None
+    }
+
+    /// 返回 `Some(h)` 时，布局引擎把本节点的高度固定为 `h`（不增长、不收缩），子元素超出的部分
+    /// 由 [`Widget::clip_children`] 裁掉。用于高度随动画变化的容器（[`crate::collapse`]）：它每帧返回新的高度，
+    /// 并通过定时器事件请求重新布局，下面的兄弟元素就会跟着移动。默认 `None`，高度由样式和子元素决定。
+    fn animated_height(&self) -> Option<f32> {
+        None
+    }
+
+    /// 窗口坐标 `pos`（已在 `bounds` 内）处的指针是否归本控件，而不是它下面的子元素：返回 `true`
+    /// 时命中测试在本控件停下，不再看子元素。用于画在子元素上面的东西（滚动条）。
+    fn intercepts_pointer(&self, _pos: Point, _bounds: Rect, _theme: &Theme) -> bool {
+        false
     }
 
     /// 画自己（在子元素下面）。
@@ -236,9 +287,11 @@ pub struct PaintCx<'a> {
     pub(crate) focused: bool,
     pub(crate) focus_visible: bool,
     pub(crate) window_focused: bool,
+    pub(crate) window_maximized: bool,
     pub(crate) theme: &'a Theme,
     pub(crate) now: Instant,
     pub(crate) frame_requested: bool,
+    pub(crate) timer: Option<Instant>,
 }
 
 impl<'a> PaintCx<'a> {
@@ -270,6 +323,11 @@ impl<'a> PaintCx<'a> {
         self.window_focused
     }
 
+    /// 窗口处于最大化状态（窗口按钮据此显示“最大化”或“还原”）。
+    pub fn window_maximized(&self) -> bool {
+        self.window_maximized
+    }
+
     pub fn theme(&self) -> &'a Theme {
         self.theme
     }
@@ -284,6 +342,12 @@ impl<'a> PaintCx<'a> {
     pub fn request_frame(&mut self) {
         self.frame_requested = true;
     }
+
+    /// 在 `at` 时刻给本控件发一次 [`Event::Timer`]。动画在绘制时推进、却要在结束时通知应用
+    /// （例如退场动画播完后调用回调）时用：事件里才能调用应用的回调。
+    pub fn request_timer(&mut self, at: Instant) {
+        self.timer = Some(at);
+    }
 }
 
 /// 事件处理时控件对框架的请求，由运行时在分发后统一处理。
@@ -295,6 +359,8 @@ pub(crate) struct EventOutput {
     pub app_touched: bool,
     pub request_focus: bool,
     pub timer: Option<Instant>,
+    /// 子元素的位置需要重新计算（滚动量变了），但不需要重新测量。
+    pub arrange: bool,
 }
 
 /// 事件处理时可用的上下文。
@@ -306,6 +372,7 @@ pub struct EventCx<'a, S> {
     pub(crate) theme: &'a Theme,
     pub(crate) host: &'a mut dyn Host,
     pub(crate) focused: bool,
+    pub(crate) captured: bool,
     pub(crate) window_focused: bool,
     pub(crate) modifiers: Modifiers,
     pub(crate) scale: f32,
@@ -341,6 +408,13 @@ impl<'a, S> EventCx<'a, S> {
         self.out.change = Change::LAYOUT;
     }
 
+    /// 子元素的位置需要重新计算，但尺寸没变、不用重新测量（例如 [`Widget::child_offset`] 变了）。
+    /// 比 [`EventCx::request_layout`] 轻得多：不跑布局引擎，只重新定位各节点并记录移动了的区域。
+    /// 不隐含重绘，需要的话另外调用 [`EventCx::request_paint`]。
+    pub fn request_arrange(&mut self) {
+        self.out.arrange = true;
+    }
+
     pub fn request_focus(&mut self) {
         self.out.request_focus = true;
     }
@@ -360,6 +434,13 @@ impl<'a, S> EventCx<'a, S> {
 
     pub fn is_focused(&self) -> bool {
         self.focused
+    }
+
+    /// 本控件正独占指针事件：它处理了按下事件，到松开之前所有指针事件都先交给它。
+    /// 拖动中的控件可以据此发现独占已经丢了（例如窗口失去焦点，松开事件不会再来）。
+    /// 注意松开事件到达时独占已经解除，这里返回 `false`。
+    pub fn is_captured(&self) -> bool {
+        self.captured
     }
 
     pub fn window_focused(&self) -> bool {
@@ -384,12 +465,46 @@ impl<'a, S> EventCx<'a, S> {
         self.blink
     }
 
+    /// 动画帧间隔（显示器刷新间隔）。用 [`EventCx::request_timer`] 逐帧驱动动画时，
+    /// 下一帧排在 `now() + frame_interval()`。
+    pub fn frame_interval(&self) -> Duration {
+        self.host.frame_interval()
+    }
+
     pub fn text(&mut self) -> &mut TextSystem {
         self.text
     }
 
     pub fn theme(&self) -> &'a Theme {
         self.theme
+    }
+
+    /// 开始用鼠标拖动窗口。用于关闭了系统标题栏（[`crate::App::decorations`]）时自己画的标题栏，
+    /// 在左键按下的事件里调用。
+    pub fn drag_window(&mut self) {
+        self.host.drag_window();
+    }
+
+    pub fn minimize_window(&mut self) {
+        self.host.minimize_window();
+    }
+
+    /// 最大化与还原之间切换。
+    pub fn toggle_maximize_window(&mut self) {
+        self.host.toggle_maximize_window();
+    }
+
+    pub fn is_window_maximizable(&self) -> bool {
+        self.host.is_window_maximizable()
+    }
+
+    pub fn is_window_maximized(&self) -> bool {
+        self.host.is_window_maximized()
+    }
+
+    /// 关闭窗口，结束 [`crate::App::run`]。
+    pub fn close_window(&mut self) {
+        self.host.exit();
     }
 
     pub fn clipboard_get(&mut self) -> Option<String> {

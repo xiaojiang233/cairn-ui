@@ -101,5 +101,24 @@ pub(crate) fn cursor_icon(c: CursorIcon) -> winit::window::CursorIcon {
         CursorIcon::Pointer => W::Pointer,
         CursorIcon::Text => W::Text,
         CursorIcon::NotAllowed => W::NotAllowed,
+        CursorIcon::ResizeHorizontal => W::EwResize,
+        CursorIcon::ResizeVertical => W::NsResize,
+        CursorIcon::ResizeNwSe => W::NwseResize,
+        CursorIcon::ResizeNeSw => W::NeswResize,
+    }
+}
+
+pub(crate) fn resize_direction(e: crate::ResizeEdge) -> winit::window::ResizeDirection {
+    use crate::ResizeEdge as E;
+    use winit::window::ResizeDirection as D;
+    match e {
+        E::North => D::North,
+        E::South => D::South,
+        E::East => D::East,
+        E::West => D::West,
+        E::NorthEast => D::NorthEast,
+        E::NorthWest => D::NorthWest,
+        E::SouthEast => D::SouthEast,
+        E::SouthWest => D::SouthWest,
     }
 }

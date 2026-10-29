@@ -47,6 +47,8 @@ pub struct Typography {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Radii {
     pub panel: f32,
+    /// 浮动工具栏（[`crate::Panel::bar`]）。
+    pub bar: f32,
     /// 按钮、输入框。
     pub control: f32,
     /// 标签、徽章。
@@ -141,11 +143,33 @@ pub struct InputStyle {
     pub focus_glow: Shadow,
     pub text: Color,
     pub placeholder: Color,
+    /// 文字前面的图标（[`crate::TextInput::icon`]）：颜色、边长，以及它和文字的间距。
+    pub icon: Color,
+    pub icon_size: f32,
+    pub icon_gap: f32,
     pub caret: Color,
     pub selection: Color,
     /// 输入法预编辑文本的下划线。
     pub preedit: Color,
     pub padding: Insets,
+}
+
+/// 滚动容器（[`crate::scroll`]）的滚动条与滚轮手感。滚动条是画在内容上面的细长滑块，没有轨道底色。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollStyle {
+    /// 滑块宽度（逻辑像素）：静止时，以及指针移到滚动条上或正在拖动时。
+    pub bar_width: f32,
+    pub bar_width_hover: f32,
+    /// 滑块离视口右、上、下边缘的距离。
+    pub bar_inset: f32,
+    /// 滑块的最小长度：内容再长，滑块也不会缩成一个点。
+    pub min_thumb: f32,
+    /// 滑块颜色：静止时；指针在滚动区域内时；指针在滚动条上或正在拖动时。
+    pub thumb: Color,
+    pub thumb_hover: Color,
+    pub thumb_active: Color,
+    /// 滚轮每格滚动的距离（逻辑像素）。
+    pub wheel_step: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -166,6 +190,108 @@ pub struct SliderStyle {
     pub knob_ring_gap: f32,
 }
 
+/// 自己画的窗口按钮（[`crate::window_controls`]）：最小化、最大化 / 还原、关闭。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaptionStyle {
+    /// 每个按钮的宽和高。
+    pub width: f32,
+    pub height: f32,
+    pub icon: Color,
+    pub icon_hover: Color,
+    /// 图标边长。
+    pub icon_size: f32,
+    pub fill_hover: Color,
+    pub fill_pressed: Color,
+    /// 关闭按钮悬停、按下时的底色，以及此时的图标颜色。
+    pub close_fill_hover: Color,
+    pub close_fill_pressed: Color,
+    pub close_icon_hover: Color,
+    pub radius: f32,
+}
+
+/// 复选框（[`crate::checkbox`]）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CheckboxStyle {
+    /// 方框边长。
+    pub size: f32,
+    pub radius: f32,
+    pub fill: Color,
+    pub fill_hover: Color,
+    /// 1 物理像素边框。
+    pub border: Color,
+    pub border_hover: Color,
+    /// 勾选后的底色与对勾颜色。
+    pub checked_fill: Color,
+    pub checked_fill_hover: Color,
+    pub check: Color,
+    /// 方框与文字的间距。
+    pub label_gap: f32,
+}
+
+/// 标签页，也用作可选中的切换按钮（[`crate::tab`]）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TabStyle {
+    pub fill: Color,
+    pub fill_hover: Color,
+    pub fill_selected: Color,
+    /// 选中时的 1 物理像素边框，透明表示没有。
+    pub border_selected: Color,
+    pub text: Color,
+    pub text_hover: Color,
+    pub text_selected: Color,
+    pub weight: u16,
+    pub icon_size: f32,
+    /// 图标、文字、徽标之间的间距。
+    pub gap: f32,
+    pub padding: Insets,
+    /// 数字徽标（如条目数）：文字与底色，未选中、选中各一套。
+    pub badge_text: Color,
+    pub badge_fill: Color,
+    pub badge_text_selected: Color,
+    pub badge_fill_selected: Color,
+}
+
+/// 进度条（[`crate::progress_bar`]）与加载指示（[`crate::spinner`]）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProgressStyle {
+    pub height: f32,
+    pub track: Color,
+    /// 已完成部分：从 `fill` 到 `fill_end` 的横向渐变。
+    pub fill: Color,
+    pub fill_end: Color,
+    /// 进度未知时来回移动的那一段占轨道的比例，以及走一个来回的时长。
+    pub indeterminate_width: f32,
+    pub indeterminate_period: Duration,
+    /// 加载指示：直径、颜色、转一圈的时长。
+    pub spinner_size: f32,
+    pub spinner: Color,
+    pub spinner_period: Duration,
+}
+
+/// 列表行（[`crate::list_item`]）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ListItemStyle {
+    pub fill: Color,
+    pub fill_hover: Color,
+    pub fill_pressed: Color,
+    pub fill_selected: Color,
+    /// 选中时的 1 物理像素边框，透明表示没有。
+    pub border_selected: Color,
+    pub padding: Insets,
+    pub gap: f32,
+}
+
+/// 小标签（[`crate::tag`]）：普通与强调两种。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TagStyle {
+    pub fill: Color,
+    pub text: Color,
+    pub accent_fill: Color,
+    pub accent_text: Color,
+    pub font_size: f32,
+    pub padding: Insets,
+}
+
 /// 键盘焦点框：在控件外 `offset` 处画 `width` 宽的圆角框。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FocusRing {
@@ -183,6 +309,16 @@ pub struct Motion {
     pub press: Duration,
     /// 焦点光晕。
     pub focus: Duration,
+    /// 滚轮的平滑滚动。0 表示滚轮一格直接跳到位。
+    pub scroll: Duration,
+    /// 进度条数值变化时的平滑过渡。
+    pub progress: Duration,
+    /// 出现与离开（[`crate::reveal`]）：时长，以及出现时从多远处移过来（逻辑像素）。
+    pub enter: Duration,
+    pub exit: Duration,
+    pub enter_offset: f32,
+    /// 展开 / 收起（[`crate::collapse`]）：高度长到完整高度的时长，收起是它的 75%。
+    pub expand: Duration,
     pub easing: Easing,
     pub press_easing: Easing,
 }
@@ -194,6 +330,11 @@ impl Motion {
             hover: Duration::ZERO,
             press: Duration::ZERO,
             focus: Duration::ZERO,
+            scroll: Duration::ZERO,
+            progress: Duration::ZERO,
+            enter: Duration::ZERO,
+            exit: Duration::ZERO,
+            expand: Duration::ZERO,
             ..self
         }
     }
@@ -219,13 +360,27 @@ pub struct Theme {
     pub spacing: Spacing,
     pub focus_ring: FocusRing,
     pub panel: PanelStyle,
+    /// 浮动工具栏（[`crate::Panel::bar`]），例如贴着窗口底部的程序坞。
+    pub bar: PanelStyle,
+    /// 弹出框（[`crate::Panel::popover`]）：从按钮下拉出来的小面板，比普通面板更不透明、阴影更重，
+    /// 盖在别的面板上也看得清。
+    pub popover: PanelStyle,
+    /// 分隔线（[`crate::divider`]）。
+    pub divider: Color,
     /// 普通按钮。
     pub button: ButtonStyle,
     /// 强调按钮（[`crate::Button::accent`]）。一页最多一两个。
     pub accent_button: ButtonStyle,
     pub icon_button: IconButtonStyle,
     pub input: InputStyle,
+    pub scroll: ScrollStyle,
     pub slider: SliderStyle,
+    pub caption: CaptionStyle,
+    pub checkbox: CheckboxStyle,
+    pub tab: TabStyle,
+    pub progress: ProgressStyle,
+    pub list_item: ListItemStyle,
+    pub tag: TagStyle,
     /// 没有专门“禁用”配色的控件（图标按钮、滑块）禁用时的整体不透明度。
     pub disabled_opacity: f32,
     pub motion: Motion,
@@ -297,6 +452,7 @@ impl Theme {
             highlight: accent,
             radius: Radii {
                 panel: 10.0,
+                bar: 10.0,
                 control: 6.0,
                 tag: 4.0,
             },
@@ -320,6 +476,33 @@ impl Theme {
                 border_hover: Color::hex(0xD0D5DB),
                 shadow: Shadow::new(0.0, 1.0, 3.0, Color::rgbaf(16, 24, 40, 0.08)),
                 shadow_hover: Shadow::new(0.0, 4.0, 12.0, Color::rgbaf(16, 24, 40, 0.10)),
+                lift: 0.0,
+            },
+            bar: PanelStyle {
+                backdrop: false,
+                fill: Color::WHITE,
+                fill_hover: Color::WHITE,
+                glow: Color::TRANSPARENT,
+                top_highlight: Color::TRANSPARENT,
+                bottom_edge: Color::TRANSPARENT,
+                border: Color::TRANSPARENT,
+                border_hover: Color::TRANSPARENT,
+                shadow: Shadow::new(0.0, 4.0, 16.0, Color::rgbaf(16, 24, 40, 0.12)),
+                shadow_hover: Shadow::new(0.0, 4.0, 16.0, Color::rgbaf(16, 24, 40, 0.12)),
+                lift: 0.0,
+            },
+            divider: Color::hex(0xE1E4E8),
+            popover: PanelStyle {
+                backdrop: false,
+                fill: Color::WHITE,
+                fill_hover: Color::WHITE,
+                glow: Color::TRANSPARENT,
+                top_highlight: Color::TRANSPARENT,
+                bottom_edge: Color::TRANSPARENT,
+                border: Color::hex(0xD0D5DB),
+                border_hover: Color::hex(0xD0D5DB),
+                shadow: Shadow::new(0.0, 8.0, 24.0, Color::rgbaf(16, 24, 40, 0.18)),
+                shadow_hover: Shadow::new(0.0, 8.0, 24.0, Color::rgbaf(16, 24, 40, 0.18)),
                 lift: 0.0,
             },
             button,
@@ -347,10 +530,23 @@ impl Theme {
                 focus_glow: Shadow::NONE,
                 text,
                 placeholder: muted,
+                icon: muted,
+                icon_size: 16.0,
+                icon_gap: 8.0,
                 caret: text,
                 selection: accent.with_alpha(72),
                 preedit: text,
                 padding: Insets::symmetric(10.0, 7.0),
+            },
+            scroll: ScrollStyle {
+                bar_width: 6.0,
+                bar_width_hover: 8.0,
+                bar_inset: 3.0,
+                min_thumb: 32.0,
+                thumb: Color::rgbaf(30, 32, 36, 0.22),
+                thumb_hover: Color::rgbaf(30, 32, 36, 0.35),
+                thumb_active: Color::rgbaf(30, 32, 36, 0.5),
+                wheel_step: 56.0,
             },
             slider: SliderStyle {
                 track_height: 4.0,
@@ -365,12 +561,88 @@ impl Theme {
                 knob_ring_width: 2.0,
                 knob_ring_gap: 2.0,
             },
+            caption: CaptionStyle {
+                width: 46.0,
+                height: 32.0,
+                icon: text,
+                icon_hover: text,
+                icon_size: 10.0,
+                fill_hover: Color::rgbaf(30, 32, 36, 0.08),
+                fill_pressed: Color::rgbaf(30, 32, 36, 0.14),
+                close_fill_hover: Color::hex(0xC42B1C),
+                close_fill_pressed: Color::hex(0xB12A1C),
+                close_icon_hover: Color::WHITE,
+                radius: 0.0,
+            },
+            checkbox: CheckboxStyle {
+                size: 16.0,
+                radius: 4.0,
+                fill: Color::WHITE,
+                fill_hover: Color::WHITE,
+                border,
+                border_hover,
+                checked_fill: accent,
+                checked_fill_hover: Color::hex(0x3B76E6),
+                check: Color::WHITE,
+                label_gap: 8.0,
+            },
+            tab: TabStyle {
+                fill: Color::TRANSPARENT,
+                fill_hover: Color::rgbaf(30, 32, 36, 0.05),
+                fill_selected: Color::rgbaf(43, 102, 217, 0.10),
+                border_selected: Color::TRANSPARENT,
+                text: Color::hex(0x5D636B),
+                text_hover: text,
+                text_selected: accent,
+                weight: 500,
+                icon_size: 16.0,
+                gap: 6.0,
+                padding: Insets::symmetric(12.0, 6.0),
+                badge_text: Color::hex(0x5D636B),
+                badge_fill: Color::rgbaf(30, 32, 36, 0.07),
+                badge_text_selected: accent,
+                badge_fill_selected: Color::rgbaf(43, 102, 217, 0.12),
+            },
+            progress: ProgressStyle {
+                height: 4.0,
+                track: Color::hex(0xDADDE2),
+                fill: accent,
+                fill_end: accent,
+                indeterminate_width: 0.3,
+                indeterminate_period: Duration::from_millis(1400),
+                spinner_size: 16.0,
+                spinner: accent,
+                spinner_period: Duration::from_millis(900),
+            },
+            list_item: ListItemStyle {
+                fill: Color::TRANSPARENT,
+                fill_hover: Color::rgbaf(30, 32, 36, 0.04),
+                fill_pressed: Color::rgbaf(30, 32, 36, 0.08),
+                fill_selected: Color::rgbaf(43, 102, 217, 0.08),
+                border_selected: Color::TRANSPARENT,
+                padding: Insets::symmetric(10.0, 8.0),
+                gap: 10.0,
+            },
+            tag: TagStyle {
+                fill: Color::rgbaf(30, 32, 36, 0.07),
+                text: Color::hex(0x5D636B),
+                accent_fill: Color::rgbaf(43, 102, 217, 0.12),
+                accent_text: accent,
+                font_size: 12.0,
+                padding: Insets::symmetric(7.0, 1.0),
+            },
             disabled_opacity: 0.5,
             // 状态切换是瞬时的，与 0.1.0 一致，也不会有动画帧。
             motion: Motion {
                 hover: Duration::ZERO,
                 press: Duration::ZERO,
                 focus: Duration::ZERO,
+                scroll: Duration::ZERO,
+                progress: Duration::ZERO,
+                enter: Duration::ZERO,
+                exit: Duration::ZERO,
+                enter_offset: 0.0,
+                expand: Duration::ZERO,
                 easing: Easing::EaseOut,
                 press_easing: Easing::EaseOut,
             },
@@ -444,6 +716,7 @@ impl Theme {
             highlight: moon,
             radius: Radii {
                 panel: 14.0,
+                bar: 18.0,
                 control: 10.0,
                 tag: 8.0,
             },
@@ -468,6 +741,33 @@ impl Theme {
                 shadow: Shadow::new(0.0, 16.0, 40.0, ink(0.5)),
                 shadow_hover: Shadow::new(0.0, 22.0, 40.0, ink(0.6)),
                 lift: 2.0,
+            },
+            bar: PanelStyle {
+                backdrop: true,
+                fill: white(0.08),
+                fill_hover: white(0.08),
+                glow: white(0.10),
+                top_highlight: white(0.18),
+                bottom_edge: Color::rgbaf(2, 6, 16, 0.30),
+                border: Color::TRANSPARENT,
+                border_hover: Color::TRANSPARENT,
+                shadow: Shadow::new(0.0, 14.0, 36.0, ink(0.5)),
+                shadow_hover: Shadow::new(0.0, 14.0, 36.0, ink(0.5)),
+                lift: 0.0,
+            },
+            divider: white(0.10),
+            popover: PanelStyle {
+                backdrop: true,
+                fill: Color::rgbaf(12, 18, 32, 0.82),
+                fill_hover: Color::rgbaf(12, 18, 32, 0.82),
+                glow: white(0.06),
+                top_highlight: white(0.16),
+                bottom_edge: Color::rgbaf(2, 6, 16, 0.4),
+                border: white(0.12),
+                border_hover: white(0.12),
+                shadow: Shadow::new(0.0, 18.0, 44.0, ink(0.6)),
+                shadow_hover: Shadow::new(0.0, 18.0, 44.0, ink(0.6)),
+                lift: 0.0,
             },
             button: glass_button,
             accent_button: ButtonStyle {
@@ -505,10 +805,23 @@ impl Theme {
                 focus_glow: Shadow::new(0.0, 0.0, 0.0, gold.with_opacity(0.18)).spread(3.0),
                 text: Color::WHITE,
                 placeholder: white(0.40),
+                icon: white(0.50),
+                icon_size: 16.0,
+                icon_gap: 10.0,
                 caret: Color::WHITE,
                 selection: moon.with_opacity(0.35),
                 preedit: moon,
                 padding: Insets::symmetric(12.0, 8.0),
+            },
+            scroll: ScrollStyle {
+                bar_width: 6.0,
+                bar_width_hover: 8.0,
+                bar_inset: 3.0,
+                min_thumb: 32.0,
+                thumb: white(0.16),
+                thumb_hover: white(0.28),
+                thumb_active: white(0.42),
+                wheel_step: 56.0,
             },
             slider: SliderStyle {
                 track_height: 6.0,
@@ -523,11 +836,87 @@ impl Theme {
                 knob_ring_width: 1.5,
                 knob_ring_gap: 2.0,
             },
+            caption: CaptionStyle {
+                width: 46.0,
+                height: 34.0,
+                icon: white(0.75),
+                icon_hover: Color::WHITE,
+                icon_size: 10.0,
+                fill_hover: white(0.10),
+                fill_pressed: white(0.06),
+                close_fill_hover: Color::rgbaf(196, 43, 28, 0.90),
+                close_fill_pressed: Color::rgbaf(196, 43, 28, 0.70),
+                close_icon_hover: Color::WHITE,
+                radius: 8.0,
+            },
+            checkbox: CheckboxStyle {
+                size: 18.0,
+                radius: 5.0,
+                fill: white(0.06),
+                fill_hover: white(0.10),
+                border: white(0.30),
+                border_hover: white(0.50),
+                checked_fill: gold,
+                checked_fill_hover: gold_light,
+                check: Color::hex(0x1A1408),
+                label_gap: 10.0,
+            },
+            tab: TabStyle {
+                fill: Color::TRANSPARENT,
+                fill_hover: white(0.06),
+                fill_selected: white(0.12),
+                border_selected: white(0.14),
+                text: white(0.60),
+                text_hover: white(0.85),
+                text_selected: Color::WHITE,
+                weight: 500,
+                icon_size: 16.0,
+                gap: 7.0,
+                padding: Insets::symmetric(14.0, 7.0),
+                badge_text: white(0.55),
+                badge_fill: white(0.08),
+                badge_text_selected: Color::hex(0x1A1408),
+                badge_fill_selected: gold,
+            },
+            progress: ProgressStyle {
+                height: 6.0,
+                track: white(0.10),
+                fill: gold,
+                fill_end: gold_light,
+                indeterminate_width: 0.3,
+                indeterminate_period: Duration::from_millis(1600),
+                spinner_size: 16.0,
+                spinner: white(0.85),
+                spinner_period: Duration::from_millis(900),
+            },
+            list_item: ListItemStyle {
+                fill: Color::TRANSPARENT,
+                fill_hover: white(0.06),
+                fill_pressed: white(0.04),
+                fill_selected: white(0.10),
+                border_selected: white(0.12),
+                padding: Insets::symmetric(12.0, 9.0),
+                gap: 12.0,
+            },
+            tag: TagStyle {
+                fill: white(0.08),
+                text: white(0.70),
+                accent_fill: gold.with_opacity(0.16),
+                accent_text: gold_light,
+                font_size: 12.0,
+                padding: Insets::symmetric(8.0, 1.0),
+            },
             disabled_opacity: 0.4,
             motion: Motion {
                 hover: Duration::from_millis(500),
                 press: Duration::from_millis(150),
                 focus: Duration::from_millis(500),
+                scroll: Duration::from_millis(220),
+                progress: Duration::from_millis(350),
+                enter: Duration::from_millis(420),
+                exit: Duration::from_millis(180),
+                enter_offset: 14.0,
+                expand: Duration::from_millis(240),
                 easing: Easing::SMOOTH,
                 press_easing: Easing::EaseOut,
             },

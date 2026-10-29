@@ -8,7 +8,7 @@ use cairn_ui_platform::{self as platform, Context, Handler, PixelRect, Surface, 
 use crate::element::{El, View};
 use crate::host::PlatformHost;
 use crate::theme::Theme;
-use crate::ui::{Clock, Ui, Update, ViewBox};
+use crate::ui::{Clock, FileDropFn, ThemeFn, Ui, Update, ViewBox};
 use crate::{Error, FontSetup, Result, TextSystem};
 
 /// “从状态生成界面”的函数，通常直接传 `Self::view` 这样的方法。
@@ -76,6 +76,19 @@ pub struct App<S: 'static> {
     view: ViewBox<S>,
     window: WindowConfig,
     theme: Theme,
+    file_drop: Option<FileDropFn<S>>,
+    theme_source: Option<ThemeFn<S>>,
+}
+
+/// 拖放文件的进展，见 [`App::on_file_drop`]。拖入多个文件时，每个文件各有一个 `Hovered` / `Dropped`。
+#[derive(Clone, Debug, PartialEq)]
+pub enum FileDrop {
+    /// 文件被拖到窗口上方，还没松开。
+    Hovered(std::path::PathBuf),
+    /// 拖到窗口上方的文件又被拖走了。
+    Cancelled,
+    /// 文件被放进窗口。
+    Dropped(std::path::PathBuf),
 }
 
 impl<S: 'static> App<S> {
@@ -87,6 +100,8 @@ impl<S: 'static> App<S> {
             view: erase_view(view),
             window: WindowConfig::default(),
             theme: Theme::default(),
+            file_drop: None,
+            theme_source: None,
         }
     }
 
@@ -107,8 +122,50 @@ impl<S: 'static> App<S> {
         self
     }
 
+    pub fn max_size(mut self, width: f32, height: f32) -> Self {
+        self.window.max_size = Some((width as f64, height as f64));
+        self
+    }
+
+    pub fn maximizable(mut self, maximizable: bool) -> Self {
+        self.window.maximizable = maximizable;
+        self
+    }
+
     pub fn resizable(mut self, resizable: bool) -> Self {
         self.window.resizable = resizable;
+        self
+    }
+
+    /// 是否使用系统标题栏和边框，默认使用。
+    ///
+    /// 关闭后窗口内容铺满整个窗口：标题栏自己画，用 [`crate::drag_area`] 做可拖动的区域、
+    /// [`crate::window_controls`] 做最小化 / 最大化 / 关闭按钮；可调整大小时，窗口四周 6 像素宽的一圈
+    /// 由框架处理成拖动改变大小。Windows 上保留系统阴影，Windows 11 上是系统圆角。
+    pub fn decorations(mut self, decorations: bool) -> Self {
+        self.window.decorations = decorations;
+        self
+    }
+
+    /// 设置窗口图标（RGBA 像素数据、宽度、高度）。
+    pub fn icon(mut self, rgba: Vec<u8>, width: u32, height: u32) -> Self {
+        self.window.icon = Some(platform::IconData::new(rgba, width, height));
+        self
+    }
+
+    /// 文件被拖到窗口上方、拖走、放下时调用，回调里修改状态后界面自动重建。
+    /// 不设置时窗口不处理拖放。
+    pub fn on_file_drop(mut self, f: impl Fn(&mut S, FileDrop) + 'static) -> Self {
+        self.file_drop = Some(Box::new(f));
+        self
+    }
+
+    /// 运行中换主题（例如深浅模式、主题色、壁纸由用户设置）：每次状态变化后调用 `f`，
+    /// 返回 `Some` 时换上新主题并按新主题重建整个界面。通常在状态里放一个 `Option<Theme>`，
+    /// 回调里 `take()` 出来：`.theme_from(|app: &mut Self| app.new_theme.take())`。
+    /// 换主题时所有控件重新测量、整窗重画（背景场景也重新生成），不要每帧都换。
+    pub fn theme_from(mut self, f: impl Fn(&mut S) -> Option<Theme> + 'static) -> Self {
+        self.theme_source = Some(Box::new(f));
         self
     }
 
@@ -128,12 +185,16 @@ impl<S: 'static> App<S> {
     pub fn run_with(self, init: impl FnOnce(Proxy<S>) -> S + 'static) -> Result<()> {
         // 扫描系统字体要几十到上百毫秒，与创建窗口并行做。
         let fonts = std::thread::spawn(|| TextSystem::new(&system_fonts()));
+        let resize_border = !self.window.decorations && self.window.resizable;
         let handler = AppHandler {
             pending: Some(Pending {
                 view: self.view,
                 theme: self.theme,
                 init: Box::new(init),
                 fonts,
+                resize_border,
+                file_drop: self.file_drop,
+                theme_source: self.theme_source,
             }),
             ui: None,
         };
@@ -169,6 +230,9 @@ struct Pending<S: 'static> {
     theme: Theme,
     init: Box<dyn FnOnce(Proxy<S>) -> S>,
     fonts: std::thread::JoinHandle<TextSystem>,
+    resize_border: bool,
+    file_drop: Option<FileDropFn<S>>,
+    theme_source: Option<ThemeFn<S>>,
 }
 
 struct AppHandler<S: 'static> {
@@ -185,7 +249,8 @@ impl<S: 'static> Handler for AppHandler<S> {
             _state: PhantomData,
         });
         let mut theme = p.theme;
-        if platform::reduce_motion() {
+        let reduce_motion = platform::reduce_motion();
+        if reduce_motion {
             theme.motion = theme.motion.reduced();
         }
         let mut ui = Ui::new(
@@ -197,6 +262,9 @@ impl<S: 'static> Handler for AppHandler<S> {
             cx.physical_size(),
             Clock::Real,
         );
+        ui.set_window_frame(p.resize_border, cx.is_maximized());
+        ui.set_file_drop(p.file_drop);
+        ui.set_theme_source(p.theme_source, reduce_motion);
         ui.after(&mut PlatformHost(cx));
         self.ui = Some(ui);
     }
