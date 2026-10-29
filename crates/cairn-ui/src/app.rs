@@ -147,6 +147,12 @@ impl<S: 'static> App<S> {
         self
     }
 
+    /// 设置窗口图标（RGBA 像素数据、宽度、高度）。
+    pub fn icon(mut self, rgba: Vec<u8>, width: u32, height: u32) -> Self {
+        self.window.icon = Some(platform::IconData::new(rgba, width, height));
+        self
+    }
+
     /// 文件被拖到窗口上方、拖走、放下时调用，回调里修改状态后界面自动重建。
     /// 不设置时窗口不处理拖放。
     pub fn on_file_drop(mut self, f: impl Fn(&mut S, FileDrop) + 'static) -> Self {

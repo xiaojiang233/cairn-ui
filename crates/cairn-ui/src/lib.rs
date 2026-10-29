@@ -88,6 +88,8 @@ pub use cairn_ui_render::{
     Size, Spot, StrokeStyle, TextLayout, TextStyle, TextSystem,
 };
 
+pub use cairn_ui_platform::IconData;
+
 /// 常用导入：`use cairn_ui::prelude::*;`
 pub mod prelude {
     pub use crate::{

@@ -60,6 +60,22 @@ pub struct WindowConfig {
     /// 系统标题栏与边框。关闭后客户区铺满整个窗口，标题栏、窗口按钮、拖动和缩放边由上层自己画、自己处理
     /// （[`Context::drag_window`]、[`Context::drag_resize_window`] 等）。Windows 上仍保留系统阴影与 Windows 11 圆角。
     pub decorations: bool,
+    /// 窗口图标。
+    pub icon: Option<IconData>,
+}
+
+/// 窗口图标数据（RGBA 像素，尺寸）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IconData {
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl IconData {
+    pub fn new(rgba: Vec<u8>, width: u32, height: u32) -> Self {
+        Self { rgba, width, height }
+    }
 }
 
 impl Default for WindowConfig {
@@ -73,6 +89,7 @@ impl Default for WindowConfig {
             resizable: true,
             maximizable: true,
             decorations: true,
+            icon: None,
         }
     }
 }
@@ -239,6 +256,12 @@ impl Context<'_> {
         }
     }
 
+    /// 动态设置窗口图标。
+    pub fn set_window_icon(&self, icon: Option<IconData>) {
+        let winit_icon = icon.and_then(|ic| winit::window::Icon::from_rgba(ic.rgba, ic.width, ic.height).ok());
+        self.window.set_window_icon(winit_icon);
+    }
+
     pub fn proxy(&self) -> Proxy {
         Proxy(self.shared.proxy.clone())
     }
@@ -396,6 +419,11 @@ impl<H: Handler> Runner<H> {
         }
         if !c.maximizable {
             attrs = attrs.with_enabled_buttons(winit::window::WindowButtons::CLOSE | winit::window::WindowButtons::MINIMIZE);
+        }
+        if let Some(icon) = &c.icon {
+            if let Ok(winit_icon) = winit::window::Icon::from_rgba(icon.rgba.clone(), icon.width, icon.height) {
+                attrs = attrs.with_window_icon(Some(winit_icon));
+            }
         }
         if !c.decorations {
             attrs = sys::undecorated(attrs);
