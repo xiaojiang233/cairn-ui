@@ -109,7 +109,7 @@ pub(crate) fn gaussian_blur(data: &mut [u16], width: usize, height: usize, chann
 
 /// CairnPhi 的 9 抽头可分离高斯模糊（利用双线性插值采样 5 次等价于 9 抽头高斯滤波）。
 /// `passes` 为水平与垂直滤波的迭代次数，`spread` 为采样步进扩展因子。
-pub(crate) fn cairn_phi_gaussian_blur(
+pub fn cairn_phi_gaussian_blur(
     data: &mut [u16],
     width: usize,
     height: usize,
@@ -197,7 +197,7 @@ fn blur_line_cairn_phi(
 
 /// 预乘 RGBA8 图像按 `factor` 倍降采样，每个低分辨率像素取对应方块的面积平均。
 /// 返回 16 位（`值 × 257`）的交错 RGBA 和新尺寸。
-pub(crate) fn downsample_rgba(src: &[u8], width: usize, height: usize, factor: usize) -> (Vec<u16>, usize, usize) {
+pub fn downsample_rgba(src: &[u8], width: usize, height: usize, factor: usize) -> (Vec<u16>, usize, usize) {
     let f = factor.max(1);
     let lw = width.div_ceil(f).max(1);
     let lh = height.div_ceil(f).max(1);

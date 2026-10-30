@@ -85,7 +85,7 @@ pub use cairn_ui_platform::{
 pub use cairn_ui_render::{
     Affine, BackdropStyle, Background, Brush, Canvas, Color, DeviceRect, FillRule, FontFamily, FontSetup, GradientStop,
     Image, ImageScene, LineCap, LineJoin, NightScene, Painter, Path, PathParseError, Point, Rect, Scene, Seg, Shadow,
-    Size, Spot, StrokeStyle, TextLayout, TextStyle, TextSystem,
+    Size, Spot, StrokeStyle, TextLayout, TextStyle, TextSystem, effects,
 };
 
 pub use cairn_ui_platform::IconData;

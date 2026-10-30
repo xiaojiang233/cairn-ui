@@ -8,7 +8,7 @@
 //!
 //! 坐标约定：对外接口一律用逻辑像素；只有 [`DeviceRect`] 和 [`Canvas`] 用物理像素。
 
-mod effects;
+pub mod effects;
 mod geom;
 mod image;
 mod painter;

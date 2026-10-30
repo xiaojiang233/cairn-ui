@@ -118,7 +118,7 @@ impl Scene for NightScene {
     }
 }
 
-/// 图片背景：按“覆盖”方式铺满窗口（保持比例、居中裁切），再盖一层暗色，保证上面的文字可读。
+/// 图片背景：按“覆盖”方式铺满窗口（保持比例、居中裁切），支持盖暗色、电影感暗角与主题光晕。
 #[derive(Clone, Debug)]
 pub struct ImageScene {
     pub image: Image,
@@ -126,6 +126,10 @@ pub struct ImageScene {
     pub dim: Color,
     /// 图片后面的底色（图片本身半透明时可见）。
     pub base: Color,
+    /// 边缘暗角强度（0.0 关闭，0.2 ~ 0.7 电影感暗角）。
+    pub vignette: f32,
+    /// 可选的主题色氛围光晕。
+    pub accent_glow: Option<Color>,
 }
 
 impl ImageScene {
@@ -134,6 +138,8 @@ impl ImageScene {
             image,
             dim: Color::rgbaf(6, 10, 19, 0.6),
             base: Color::hex(0x0B1322),
+            vignette: 0.0,
+            accent_glow: None,
         }
     }
 }
@@ -149,6 +155,46 @@ impl Scene for ImageScene {
             let dest = Rect::new((size.width - w) / 2.0, (size.height - h) / 2.0, w, h);
             p.draw_image(&self.image, dest, 1.0);
         }
-        p.fill_rect(all, self.dim);
+        if self.dim.a > 0 {
+            p.fill_rect(all, self.dim);
+        }
+        if let Some(glow) = self.accent_glow {
+            if glow.a > 0 {
+                let center = Point::new(size.width * 0.72, size.height * 0.28);
+                let radius = size.width.max(size.height) * 0.75;
+                p.fill(
+                    all,
+                    0.0,
+                    &Brush::radial(
+                        center,
+                        radius,
+                        [
+                            (0.0, glow),
+                            (0.40, glow.fade(0.5)),
+                            (1.0, glow.with_alpha(0)),
+                        ],
+                    ),
+                );
+            }
+        }
+        if self.vignette > 0.005 {
+            let center = all.center();
+            let reach = (size.width * size.width + size.height * size.height).sqrt() / 2.0;
+            let v_color = Color::rgbaf(0, 0, 0, self.vignette);
+            p.fill(
+                all,
+                0.0,
+                &Brush::radial(
+                    center,
+                    reach,
+                    [
+                        (0.0, v_color.with_alpha(0)),
+                        (0.38, v_color.with_alpha(0)),
+                        (0.75, v_color.fade(0.55)),
+                        (1.0, v_color),
+                    ],
+                ),
+            );
+        }
     }
 }
