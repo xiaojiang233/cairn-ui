@@ -1,6 +1,6 @@
 [package]
 name = "cairn-ui-platform"
-description = "cairn-ui 平台层：窗口、事件循环、软件上屏、IME、DPI、剪贴板、字体目录"
+description = "cairn-ui 平台层：窗口、事件循环、上屏（OpenGL 或软件）、IME、DPI、剪贴板、字体目录"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,8 +15,11 @@ sys-locale = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true }
+glutin = { workspace = true }
+glutin-winit = { workspace = true }
+glow = { workspace = true }
+raw-window-handle = { workspace = true }
 
-# 以后做 Linux 时打开对应后端（目前未在 Linux 上编译验证过）。
 [target.'cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))'.dependencies]
 winit = { workspace = true, features = ["x11", "wayland", "wayland-dlopen"] }
 softbuffer = { workspace = true, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }

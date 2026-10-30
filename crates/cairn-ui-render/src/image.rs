@@ -1,15 +1,12 @@
-//! 位图。本 crate 不做图片解码（不引入解码库），调用方传入已解码的 RGBA 像素。
-
 use std::fmt;
 
-/// 一张位图，内部是预乘 alpha 的 RGBA8。
 #[derive(Clone)]
 pub struct Image {
     pub(crate) pixmap: tiny_skia::Pixmap,
+    pub(crate) glass: Option<tiny_skia::Pixmap>,
 }
 
 impl Image {
-    /// 从非预乘的 RGBA8 像素创建（行优先、紧密排列，长度必须是 `width * height * 4`）。
     pub fn from_rgba8(width: u32, height: u32, mut rgba: Vec<u8>) -> Option<Image> {
         if rgba.len() != width as usize * height as usize * 4 {
             return None;
@@ -25,6 +22,7 @@ impl Image {
         let size = tiny_skia::IntSize::from_wh(width, height)?;
         Some(Image {
             pixmap: tiny_skia::Pixmap::from_vec(rgba, size)?,
+            glass: None,
         })
     }
 

@@ -1,21 +1,9 @@
-//! 基于 tiny-skia 的 CPU 渲染实现。
-//!
-//! [`Canvas`] 持有整窗口大小的画布。重绘时只处理脏区：每个脏区先画进一块同样大小的临时
-//! 像素图（天然被裁剪到脏区内），再整块拷回画布。这样小范围更新（如光标闪烁）不需要
-//! 为整个窗口生成裁剪蒙版，大背景填充也只会处理脏区那一小块。
-//!
-//! 背景分三层缓存，只在窗口尺寸、缩放因子或场景变化时重算：
-//! 1. 场景（[`Scene`]）画成的整窗口像素图，每次重绘脏区时先从这里拷贝底色；
-//! 2. 场景降采样、模糊、提高饱和度后的低分辨率图像，玻璃面板用 [`Brush::Backdrop`] 取样，
-//!    取样时双线性插值放大回原尺寸；
-//! 3. 256×256 的噪点块，每个脏区画完后按窗口绝对坐标叠加，所以局部重绘没有接缝。
-
 use std::rc::Rc;
 
 use cosmic_text::SwashContent;
 use tiny_skia::{
-    FillRule, FilterQuality, IntSize, LineCap, LineJoin, LinearGradient, Mask, Paint, Path, PathBuilder, Pattern,
-    Pixmap, PixmapMut, RadialGradient, Shader, SpreadMode, Stroke, StrokeDash, Transform,
+    BlendMode, FillRule, FilterQuality, IntSize, LineCap, LineJoin, LinearGradient, Mask, Paint, Path, PathBuilder,
+    Pattern, Pixmap, PixmapMut, RadialGradient, Shader, SpreadMode, Stroke, StrokeDash, Transform,
 };
 
 use crate::effects::{self, NOISE_SIZE, ShadowCache, rrect_coverage};
@@ -26,21 +14,16 @@ use crate::path::{Path as VPath, Seg};
 use crate::scene::Scene;
 use crate::text::{TextLayout, TextSystem};
 
-/// 窗口背景。
 #[derive(Clone, Debug)]
 pub enum Background {
     Solid(Color),
     Scene(Rc<dyn Scene>),
 }
 
-/// 背景模糊（玻璃效果）的参数。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BackdropStyle {
-    /// 高斯模糊的标准差（逻辑像素），语义同 CSS `backdrop-filter: blur()`。
     pub blur: f32,
-    /// 饱和度倍数，语义同 CSS `saturate()`。
     pub saturation: f32,
-    /// 先缩小这么多倍再模糊。模糊半径很大时看不出差别，计算量小得多。
     pub downsample: u32,
 }
 
@@ -54,7 +37,28 @@ impl Default for BackdropStyle {
     }
 }
 
-/// 整窗口画布：RGBA8、预乘 alpha、行优先紧密排列。
+impl BackdropStyle {
+    pub fn kernel(&self, scale: f32) -> (u32, f32) {
+        let passes = match self.blur {
+            b if b <= 0.0 => 0,
+            b if b >= 45.0 => 3,
+            _ => 2,
+        };
+        (passes, (self.blur * scale / 14.0).clamp(1.2, 4.0))
+    }
+
+    pub fn brightness(&self) -> f32 {
+        if self.blur > 0.0 { 0.98 } else { 1.0 }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SceneStatus {
+    Current,
+    Stale,
+    Missing,
+}
+
 pub struct Canvas {
     width: u32,
     height: u32,
@@ -64,17 +68,19 @@ pub struct Canvas {
     backdrop_style: BackdropStyle,
     noise_amount: f32,
     noise: Vec<u8>,
-    /// 场景与模糊背景缓存对应的 (宽, 高, 缩放因子的位模式)。`None` 表示需要重算。
     layers_key: Option<(u32, u32, u32)>,
     scene: Option<Pixmap>,
     backdrop: Option<Pixmap>,
-    /// 模糊背景按窗口分辨率放大后的整幅图(不透明)。玻璃面板填充时直接拷贝它,不用每次重新做双线性采样。
     backdrop_full: Option<Pixmap>,
     shadows: ShadowCache,
-    /// 阴影缓存对应的缩放因子（位模式）。
     shadow_scale: Option<u32>,
-    /// 透明度图层用过的缓冲区，留着下一帧复用（动画期间每帧都要用）。
     layer_pool: Vec<Vec<u8>>,
+    compositing: bool,
+    glass: Vec<u8>,
+    glass_scratch: Vec<u8>,
+    scene_image: Option<Pixmap>,
+    scene_key: Option<(u32, u32, u32)>,
+    scene_generation: u64,
 }
 
 impl Default for Canvas {
@@ -95,6 +101,12 @@ impl Default for Canvas {
             shadows: ShadowCache::default(),
             shadow_scale: None,
             layer_pool: Vec::new(),
+            compositing: false,
+            glass: Vec::new(),
+            glass_scratch: Vec::new(),
+            scene_image: None,
+            scene_key: None,
+            scene_generation: 0,
         }
     }
 }
@@ -104,7 +116,6 @@ impl Canvas {
         Self::default()
     }
 
-    /// 调整尺寸（物理像素）。尺寸变化时内容被清空，需要整窗重画。返回尺寸是否变化。
     pub fn resize(&mut self, width: u32, height: u32) -> bool {
         if (width, height) == (self.width, self.height) {
             return false;
@@ -113,6 +124,10 @@ impl Canvas {
         self.height = height;
         self.pixels.clear();
         self.pixels.resize(width as usize * height as usize * 4, 0);
+        if self.compositing {
+            self.glass.clear();
+            self.glass.resize(width as usize * height as usize, 0);
+        }
         self.layers_key = None;
         true
     }
@@ -129,10 +144,88 @@ impl Canvas {
         &self.pixels
     }
 
-    /// 设置窗口背景。之后需要整窗重画。
     pub fn set_background(&mut self, background: Background) {
         self.background = background;
         self.layers_key = None;
+        self.scene_key = None;
+    }
+
+    pub fn background(&self) -> &Background {
+        &self.background
+    }
+
+    pub fn backdrop_style(&self) -> BackdropStyle {
+        self.backdrop_style
+    }
+
+    pub fn noise(&self) -> f32 {
+        self.noise_amount
+    }
+
+    pub fn set_compositing(&mut self, on: bool) {
+        if on == self.compositing {
+            return;
+        }
+        self.compositing = on;
+        self.layers_key = None;
+        self.scene = None;
+        self.backdrop = None;
+        self.backdrop_full = None;
+        self.scene_image = None;
+        self.scene_key = None;
+        self.glass.clear();
+        if on {
+            self.glass.resize(self.width as usize * self.height as usize, 0);
+        }
+    }
+
+    pub fn compositing(&self) -> bool {
+        self.compositing
+    }
+
+    pub fn glass(&self) -> &[u8] {
+        &self.glass
+    }
+
+    pub fn scene_status(&self, scale: f32) -> SceneStatus {
+        if !matches!(self.background, Background::Scene(_)) {
+            return SceneStatus::Current;
+        }
+        match self.scene_key {
+            None => SceneStatus::Missing,
+            Some(key) if key == (self.width, self.height, scale.to_bits()) => SceneStatus::Current,
+            Some(_) => SceneStatus::Stale,
+        }
+    }
+
+    pub fn scene_image(&self) -> Option<(&[u8], u32, u32, u64)> {
+        let p = self.scene_image.as_ref()?;
+        Some((p.data(), p.width(), p.height(), self.scene_generation))
+    }
+
+    pub fn paint_scene(&mut self, scale: f32, text: &mut TextSystem) {
+        let Background::Scene(scene) = &self.background else {
+            self.scene_image = None;
+            return;
+        };
+        let scene = scene.clone();
+        self.scene_key = Some((self.width, self.height, scale.to_bits()));
+        self.scene_image = self.paint_scene_pixmap(&*scene, scale, text);
+        self.scene_generation += 1;
+    }
+
+    fn paint_scene_pixmap(&mut self, scene: &dyn Scene, scale: f32, text: &mut TextSystem) -> Option<Pixmap> {
+        let mut pixmap = Pixmap::new(self.width, self.height)?;
+        let res = Resources {
+            backdrop: None,
+            backdrop_full: None,
+            background: Color::BLACK,
+            shadows: &mut self.shadows,
+            layer_pool: &mut self.layer_pool,
+        };
+        let mut p = SkiaPainter::new(pixmap.as_mut(), None, (0, 0), scale, text, res);
+        scene.paint(&mut p, Size::new(self.width as f32 / scale, self.height as f32 / scale));
+        Some(pixmap)
     }
 
     pub fn set_backdrop_style(&mut self, style: BackdropStyle) {
@@ -142,19 +235,16 @@ impl Canvas {
         }
     }
 
-    /// 全局噪点的不透明度（0 关闭）。例如 0.025 是 2.5%。
     pub fn set_noise(&mut self, amount: f32) {
         self.noise_amount = amount.clamp(0.0, 1.0);
     }
 
-    /// 窗口尺寸、缩放或场景变了：重画场景，重算模糊背景。
     fn ensure_layers(&mut self, scale: f32, text: &mut TextSystem) {
         let key = (self.width, self.height, scale.to_bits());
         if self.layers_key == Some(key) {
             return;
         }
         if self.shadow_scale != Some(key.2) {
-            // 阴影蒙版按物理尺寸缓存，换了缩放因子后旧的都用不上了。
             self.shadows.clear();
             self.shadow_scale = Some(key.2);
         }
@@ -162,34 +252,23 @@ impl Canvas {
         self.scene = None;
         self.backdrop = None;
         self.backdrop_full = None;
+        if self.compositing {
+            return;
+        }
         let Background::Scene(scene) = &self.background else {
             return;
         };
         let scene = scene.clone();
-        let Some(mut pixmap) = Pixmap::new(self.width, self.height) else {
+        let Some(pixmap) = self.paint_scene_pixmap(&*scene, scale, text) else {
             return;
         };
-        {
-            let res = Resources {
-                backdrop: None,
-                backdrop_full: None,
-                background: Color::BLACK,
-                shadows: &mut self.shadows,
-                layer_pool: &mut self.layer_pool,
-            };
-            let mut p = SkiaPainter::new(pixmap.as_mut(), (0, 0), scale, text, res);
-            scene.paint(&mut p, Size::new(self.width as f32 / scale, self.height as f32 / scale));
-        }
         let st = self.backdrop_style;
         let f = st.downsample.max(1) as usize;
         let (mut buf, lw, lh) = effects::downsample_rgba(pixmap.data(), self.width as usize, self.height as usize, f);
         if st.blur > 0.0 {
-            // 采用 CairnPhi 的 9 抽头可分离高斯模糊算法与暗调衰减：
-            // 保证丝滑散焦的梦幻光晕，杜绝单遍模糊的生硬轮廓
-            let passes = if st.blur >= 45.0 { 3 } else { 2 };
-            let spread = (st.blur * scale / 14.0).clamp(1.2, 4.0);
+            let (passes, spread) = st.kernel(scale);
             effects::cairn_phi_gaussian_blur(&mut buf, lw, lh, 4, passes, spread);
-            effects::adjust_brightness(&mut buf, 0.98);
+            effects::adjust_brightness(&mut buf, st.brightness());
         }
         effects::saturate(&mut buf, st.saturation);
         let data: Vec<u8> = buf.iter().map(|&v| ((v as u32 + 128) / 257) as u8).collect();
@@ -201,9 +280,6 @@ impl Canvas {
         self.scene = Some(pixmap);
     }
 
-    /// 把一组绘制画进一张透明的离屏位图（物理像素矩形 `rect`，窗口坐标），用作合成层缓存：
-    /// 动画期间只移动、淡入淡出这张位图，不必每帧重画里面的内容。
-    /// 玻璃（[`Brush::Backdrop`]）按位图在窗口里的原位置取背景。
     pub fn render_layer(
         &mut self,
         rect: DeviceRect,
@@ -215,6 +291,11 @@ impl Canvas {
         let rect = rect.intersection(&bounds)?;
         self.ensure_layers(scale, text);
         let mut pixmap = Pixmap::new(rect.width, rect.height)?;
+        let mut glass = if self.compositing {
+            Some(Pixmap::new(rect.width, rect.height)?)
+        } else {
+            None
+        };
         {
             let factor = self.backdrop_style.downsample.max(1) as f32;
             let solid = match &self.background {
@@ -228,14 +309,20 @@ impl Canvas {
                 shadows: &mut self.shadows,
                 layer_pool: &mut self.layer_pool,
             };
-            let mut painter = SkiaPainter::new(pixmap.as_mut(), (rect.x, rect.y), scale, text, res);
+            let mut painter = SkiaPainter::new(
+                pixmap.as_mut(),
+                glass.as_mut().map(|g| g.as_mut()),
+                (rect.x, rect.y),
+                scale,
+                text,
+                res,
+            );
             f(&mut painter);
         }
-        Some(Image { pixmap })
+        let glass = glass.filter(|g| g.data().chunks_exact(4).any(|px| px[3] != 0));
+        Some(Image { pixmap, glass })
     }
 
-    /// 重画 `region`（物理像素，窗口坐标）。`region` 内原有的像素被完全替换：
-    /// 先铺背景（纯色或场景），再执行 `f`，最后叠噪点。`f` 里画的内容被裁剪到 `region` 内。
     pub fn paint_region(
         &mut self,
         region: DeviceRect,
@@ -259,19 +346,22 @@ impl Canvas {
             Background::Solid(c) => *c,
             Background::Scene(_) => Color::BLACK,
         };
-        match &self.scene {
-            Some(scene) => {
-                let src = scene.data();
-                for row in 0..h {
-                    let s = (y0 + row) * stride + x0 * 4;
-                    self.scratch[row * w * 4..(row + 1) * w * 4].copy_from_slice(&src[s..s + w * 4]);
-                }
+        if self.compositing {
+            self.scratch[..len].fill(0);
+            if self.glass_scratch.len() < len {
+                self.glass_scratch.resize(len, 0);
             }
-            None => {
-                let px = premultiply(solid);
-                for c in self.scratch[..len].chunks_exact_mut(4) {
-                    c.copy_from_slice(&px);
-                }
+            self.glass_scratch[..len].fill(0);
+        } else if let Some(scene) = &self.scene {
+            let src = scene.data();
+            for row in 0..h {
+                let s = (y0 + row) * stride + x0 * 4;
+                self.scratch[row * w * 4..(row + 1) * w * 4].copy_from_slice(&src[s..s + w * 4]);
+            }
+        } else {
+            let px = premultiply(solid);
+            for c in self.scratch[..len].chunks_exact_mut(4) {
+                c.copy_from_slice(&px);
             }
         }
         {
@@ -285,10 +375,23 @@ impl Canvas {
                 shadows: &mut self.shadows,
                 layer_pool: &mut self.layer_pool,
             };
-            let mut painter = SkiaPainter::new(pixmap, (region.x, region.y), scale, text, res);
+            let glass = self.compositing.then(|| {
+                PixmapMut::from_bytes(&mut self.glass_scratch[..len], region.width, region.height)
+                    .expect("脏区尺寸非零")
+            });
+            let mut painter = SkiaPainter::new(pixmap, glass, (region.x, region.y), scale, text, res);
             f(&mut painter);
         }
-        if self.noise_amount > 0.0 {
+        if self.compositing {
+            let gw = self.width as usize;
+            for row in 0..h {
+                let src = &self.glass_scratch[row * w * 4..(row + 1) * w * 4];
+                let start = (y0 + row) * gw + x0;
+                for (d, s) in self.glass[start..start + w].iter_mut().zip(src.chunks_exact(4)) {
+                    *d = s[3];
+                }
+            }
+        } else if self.noise_amount > 0.0 {
             if self.noise.is_empty() {
                 self.noise = effects::noise_tile();
             }
@@ -312,7 +415,6 @@ fn premultiply(c: Color) -> [u8; 4] {
     ]
 }
 
-/// 按窗口绝对坐标把噪点块叠加到一个脏区上（source-over，噪点灰度为颜色，`amount` 为不透明度）。
 fn apply_noise(buf: &mut [u8], region: DeviceRect, tile: &[u8], amount: f32) {
     let a = (amount * 65536.0) as i32;
     let w = region.width as usize;
@@ -330,38 +432,25 @@ fn apply_noise(buf: &mut [u8], region: DeviceRect, tile: &[u8], amount: f32) {
     }
 }
 
-/// 画家需要的共享资源。
 struct Resources<'a> {
-    /// 模糊背景与它的降采样倍数。
     backdrop: Option<(&'a Pixmap, f32)>,
-    /// 模糊背景放大到窗口分辨率的整幅图。
     backdrop_full: Option<&'a Pixmap>,
-    /// 没有场景时 [`Brush::Backdrop`] 退化成的颜色。
     background: Color,
     shadows: &'a mut ShadowCache,
     layer_pool: &'a mut Vec<Vec<u8>>,
 }
 
-/// 一层透明度图层：与像素图同尺寸、同坐标的离屏缓冲（预乘 RGBA，初始全透明）。
-/// 尺寸相同，裁剪蒙版就能原样沿用。
 struct Layer {
     buf: Vec<u8>,
     opacity: f32,
-    /// 合成时要处理的范围（局部物理坐标）。
     area: DeviceRect,
 }
 
-/// 一层裁剪。
 struct Clip {
-    /// 外接矩形（局部物理坐标），已与上一层相交。
     rect: DeviceRect,
-    /// 圆角等非矩形裁剪的逐像素覆盖率（尺寸同整块像素图）。`None` 表示裁剪区就是 `rect`。
     mask: Option<Rc<Mask>>,
-    /// `mask` 在 `rect` 之外已经全是 0（本层就是用它建的），可以直接交给 tiny-skia。
     mask_exact: bool,
-    /// 交给 tiny-skia 画路径用的蒙版（`rect` 与 `mask` 的交集），按需生成。
     path_mask: Option<Mask>,
-    /// 就是整块像素图：画路径时不需要蒙版。
     full: bool,
 }
 
@@ -377,7 +466,6 @@ impl Clip {
     }
 }
 
-/// 局部物理坐标下的浮点矩形（左、上、右、下）。
 #[derive(Clone, Copy, Debug)]
 struct DRect {
     l: f32,
@@ -395,7 +483,6 @@ impl DRect {
         self.b - self.t
     }
 
-    /// 向外取整的整数外接矩形。
     fn cover(&self) -> DeviceRect {
         let l = self.l.floor() as i32;
         let t = self.t.floor() as i32;
@@ -405,7 +492,6 @@ impl DRect {
     }
 }
 
-/// 圆角矩形内部“肯定完全覆盖”的两块区域（横条、竖条），逐像素循环时用来跳过。
 struct Interior {
     a: DRect,
     b: DRect,
@@ -430,7 +516,6 @@ impl Interior {
         }
     }
 
-    /// 像素中心纵坐标为 `y` 的那一行里可以跳过的像素列区间 `[from, to)`。
     fn span(&self, y: f32) -> (i32, i32) {
         let pick = if y >= self.a.t && y <= self.a.b {
             &self.a
@@ -445,26 +530,22 @@ impl Interior {
     }
 }
 
-/// tiny-skia 实现的 [`Painter`]。坐标先经过变换栈、换算到物理像素、对齐像素网格，
-/// 再平移到当前临时像素图的局部坐标。
 pub struct SkiaPainter<'a> {
     pixmap: PixmapMut<'a>,
-    /// 临时像素图左上角在窗口物理坐标中的位置。
+    glass: Option<PixmapMut<'a>>,
     origin: (i32, i32),
     scale: f32,
     text: &'a mut TextSystem,
     res: Resources<'a>,
-    /// 变换栈，栈顶是当前（已复合的）变换。
     transforms: Vec<Affine>,
-    /// 裁剪栈，第 0 层是整块像素图。
     clips: Vec<Clip>,
-    /// 透明度图层栈。非空时所有绘制都落在栈顶的图层上。
     layers: Vec<Layer>,
 }
 
 impl<'a> SkiaPainter<'a> {
     fn new(
         pixmap: PixmapMut<'a>,
+        glass: Option<PixmapMut<'a>>,
         origin: (i32, i32),
         scale: f32,
         text: &'a mut TextSystem,
@@ -473,6 +554,7 @@ impl<'a> SkiaPainter<'a> {
         let full = DeviceRect::new(0, 0, pixmap.width(), pixmap.height());
         SkiaPainter {
             pixmap,
+            glass,
             origin,
             scale,
             text,
@@ -483,8 +565,6 @@ impl<'a> SkiaPainter<'a> {
         }
     }
 
-    /// 当前的绘制目标：栈顶的透明度图层，没有图层时是像素图本身。
-    /// 只借用这两个字段，调用方可以同时借用裁剪栈、文字系统等其他字段。
     fn target<'b>(pixmap: &'b mut PixmapMut<'a>, layers: &'b mut [Layer]) -> PixmapMut<'b> {
         let (w, h) = (pixmap.width(), pixmap.height());
         match layers.last_mut() {
@@ -497,13 +577,10 @@ impl<'a> SkiaPainter<'a> {
         self.transforms.last().copied().unwrap_or(Affine::IDENTITY)
     }
 
-    /// 逻辑长度 → 物理长度的倍数（含变换的缩放）。
     fn k(&self) -> f32 {
         self.xf().scale * self.scale
     }
 
-    /// 当前变换不含缩放：边缘对齐像素网格，平移量取整到整像素。
-    /// 有缩放（按下缩小之类的短暂动效）时按实际位置抗锯齿绘制。
     fn snapped(&self) -> bool {
         (self.xf().scale - 1.0).abs() < 1e-4
     }
@@ -524,8 +601,6 @@ impl<'a> SkiaPainter<'a> {
         }
     }
 
-    /// 逻辑矩形 → 局部物理坐标。不缩放时四条边分别四舍五入到像素网格：相邻矩形共享同一条边时
-    /// 取整结果一致，不会出现缝隙或重叠；非空矩形至少占 1 个物理像素。
     fn map_rect(&self, r: Rect) -> Option<DRect> {
         if r.is_empty() {
             return None;
@@ -558,7 +633,6 @@ impl<'a> SkiaPainter<'a> {
         }
     }
 
-    /// 矢量路径经 `at` 和当前变换，换成局部物理像素坐标的 tiny-skia 路径。
     fn device_path(&self, path: &VPath, at: Affine) -> Option<Path> {
         let mut pb = PathBuilder::new();
         let map = |p: &Point| self.map_point(at.apply(*p));
@@ -586,7 +660,6 @@ impl<'a> SkiaPainter<'a> {
         pb.finish()
     }
 
-    /// 给 tiny-skia 画路径用的裁剪蒙版。`Err(())` 表示裁剪区为空，什么都不用画。
     fn path_mask(clips: &mut [Clip], w: u32, h: u32) -> Result<Option<&Mask>, ()> {
         let clip = clips.last_mut().expect("裁剪栈不为空");
         if clip.rect.is_empty() {
@@ -613,7 +686,6 @@ impl<'a> SkiaPainter<'a> {
                 }
             };
             if clip.mask.is_some() {
-                // 继承来的圆角蒙版：再把本层矩形外的部分清零。
                 let data = m.data_mut();
                 for y in 0..h as i32 {
                     let row = &mut data[y as usize * w as usize..(y as usize + 1) * w as usize];
@@ -638,7 +710,31 @@ impl<'a> SkiaPainter<'a> {
         Self::target(&mut self.pixmap, &mut self.layers).fill_path(path, paint, rule, Transform::identity(), mask);
     }
 
-    /// 不抗锯齿地填充整数矩形（已对齐像素网格），裁剪到当前裁剪矩形。只在裁剪区没有蒙版时用。
+    fn layer_opacity(&self) -> f32 {
+        self.layers.iter().map(|l| l.opacity).product()
+    }
+
+    fn fill_glass_path(&mut self, path: &Path, rule: FillRule) {
+        let erase = Paint {
+            blend_mode: BlendMode::DestinationOut,
+            ..Paint::default()
+        };
+        self.fill_skia_path(path, rule, &erase);
+        let mut paint = Paint::default();
+        let opacity = self.layer_opacity();
+        paint.set_color(tiny_skia::Color::from_rgba(1.0, 1.0, 1.0, opacity).unwrap_or(tiny_skia::Color::WHITE));
+        self.fill_glass_channel(path, rule, &paint);
+    }
+
+    fn fill_glass_channel(&mut self, path: &Path, rule: FillRule, paint: &Paint) {
+        let (w, h) = (self.pixmap.width(), self.pixmap.height());
+        let Some(glass) = &mut self.glass else { return };
+        let Ok(mask) = Self::path_mask(&mut self.clips, w, h) else {
+            return;
+        };
+        glass.fill_path(path, paint, rule, Transform::identity(), mask);
+    }
+
     fn fill_device_rect(&mut self, d: DRect, color: Color) {
         let c = self.clip().rect;
         let l = (d.l as i32).max(c.x);
@@ -656,7 +752,6 @@ impl<'a> SkiaPainter<'a> {
         }
     }
 
-    /// 可以走“整数矩形、无蒙版”快速路径。
     fn rect_fast_path(&self, radius_px: f32) -> bool {
         self.snapped() && radius_px < 0.5 && self.clip().mask.is_none()
     }
@@ -671,7 +766,6 @@ impl<'a> SkiaPainter<'a> {
             .collect()
     }
 
-    /// 笔刷对应的 tiny-skia 着色器。完全透明时返回 `None`。
     fn paint_for(&self, brush: &Brush) -> Option<Paint<'a>> {
         let solid = |c: Color| -> Option<Paint<'a>> {
             if c.a == 0 {
@@ -714,7 +808,6 @@ impl<'a> SkiaPainter<'a> {
                 }
             }
             Brush::Backdrop => match self.res.backdrop {
-                // 模糊背景与窗口对齐：低分辨率像素 (i, j) 覆盖窗口物理像素 [f·i, f·(i+1))。
                 Some((pixmap, f)) => Pattern::new(
                     pixmap.as_ref(),
                     SpreadMode::Pad,
@@ -731,7 +824,6 @@ impl<'a> SkiaPainter<'a> {
         })
     }
 
-    /// 把预乘的位图按整像素位置、透明度 `opacity` source-over 混合进当前目标，裁剪到当前裁剪区。
     fn blit(&mut self, image: &Image, x: i32, y: i32, opacity: f32) {
         let clip = self.clip();
         let mask = clip.mask.clone();
@@ -742,8 +834,29 @@ impl<'a> SkiaPainter<'a> {
         let a = (opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
         let w = self.pixmap.width() as usize;
         let src = image.pixmap.data();
+        let white = scale_px(u32::MAX, (self.layer_opacity() * 255.0).round() as u32);
         let mut target = Self::target(&mut self.pixmap, &mut self.layers);
         let dst = target.data_mut();
+        if let (Some(gsrc), Some(gdst)) = (&image.glass, &mut self.glass) {
+            let (gsrc, gdst) = (gsrc.data(), gdst.data_mut());
+            for py in area.y..area.bottom() {
+                for px in area.x..area.right() {
+                    let s = (((py - y) * iw + (px - x)) as usize) * 4;
+                    let d = (py as usize * w + px as usize) * 4;
+                    let mut k = a;
+                    if let Some(m) = &mask {
+                        k = mul255(k, m.data()[py as usize * w + px as usize] as u32);
+                    }
+                    let g = mul255(gsrc[s + 3] as u32, k);
+                    if g == 0 {
+                        continue;
+                    }
+                    let old = px_at(&dst[d..d + 4]);
+                    dst[d..d + 4].copy_from_slice(&scale_px(old, 255 - g).to_le_bytes());
+                    fill_row_color(&mut gdst[d..d + 4], white, g);
+                }
+            }
+        }
         for py in area.y..area.bottom() {
             let s0 = (((py - y) * iw + (area.x - x)) as usize) * 4;
             let d0 = (py as usize * w + area.x as usize) * 4;
@@ -751,7 +864,6 @@ impl<'a> SkiaPainter<'a> {
             match &mask {
                 None => over_row(&mut dst[d0..d0 + n], &src[s0..s0 + n], a),
                 Some(m) => {
-                    // 圆角蒙版:每个像素的不透明度还要乘上蒙版覆盖率。
                     let mrow = &m.data()[py as usize * w + area.x as usize..][..area.width as usize];
                     for (i, &cov) in mrow.iter().enumerate() {
                         let k = mul255(a, cov as u32);
@@ -763,9 +875,6 @@ impl<'a> SkiaPainter<'a> {
         }
     }
 
-    /// 圆角矩形填充的快路径。条件:整数对齐、当前裁剪没有蒙版,笔刷是纯色、竖直渐变或模糊背景。
-    /// 中间的大块逐行直接写像素(模糊背景是整行拷贝),只有四个圆角按到圆心的距离估算覆盖率、逐像素混合。
-    /// 比走 tiny-skia 的着色器管线快一个数量级,玻璃面板整块填充都靠它。返回是否已经画完。
     fn fill_rrect_fast(&mut self, d: DRect, rad: f32, brush: &Brush) -> bool {
         if self.clip().mask.is_some() {
             return false;
@@ -785,9 +894,9 @@ impl<'a> SkiaPainter<'a> {
 
         enum Source<'s> {
             Solid(u32),
-            /// 竖直渐变:起点终点的纵坐标(局部物理像素)和色标。
             Rows(f32, f32, &'s [GradientStop]),
             Backdrop(&'s Pixmap),
+            Glass(u32),
         }
         let source = match brush {
             Brush::Solid(color) => {
@@ -804,6 +913,10 @@ impl<'a> SkiaPainter<'a> {
                 }
                 Source::Rows(y0, y1, stops)
             }
+            Brush::Backdrop if self.glass.is_some() => {
+                let a = (self.layer_opacity() * 255.0).round() as u32;
+                Source::Glass(scale_px(u32::MAX, a))
+            }
             Brush::Backdrop => match self.res.backdrop_full {
                 Some(full) => Source::Backdrop(full),
                 None => return false,
@@ -815,12 +928,13 @@ impl<'a> SkiaPainter<'a> {
         let res = &self.res;
         let mut target = Self::target(&mut self.pixmap, &mut self.layers);
         let data = target.data_mut();
-        // 一行里 [x0, x1) 这一段用笔刷颜色(覆盖率 cov)铺上去。
-        let paint_span = |data: &mut [u8], y: i32, x0: i32, x1: i32, cov: u32| {
+        let mut glass = self.glass.as_mut().map(|g| g.data_mut());
+        let mut paint_span = |data: &mut [u8], y: i32, x0: i32, x1: i32, cov: u32| {
             if x1 <= x0 {
                 return;
             }
-            let row = &mut data[(y as usize * w + x0 as usize) * 4..(y as usize * w + x1 as usize) * 4];
+            let span = (y as usize * w + x0 as usize) * 4..(y as usize * w + x1 as usize) * 4;
+            let row = &mut data[span.clone()];
             match &source {
                 Source::Solid(color) => fill_row_color(row, *color, cov),
                 Source::Rows(y0, y1, stops) => fill_row_color(
@@ -838,6 +952,18 @@ impl<'a> SkiaPainter<'a> {
                         over_row(row, src, cov);
                     }
                 }
+                Source::Glass(white) => {
+                    if cov >= 255 {
+                        row.fill(0);
+                    } else {
+                        for d in row.chunks_exact_mut(4) {
+                            d.copy_from_slice(&scale_px(px_at(d), 255 - cov).to_le_bytes());
+                        }
+                    }
+                    if let Some(glass) = glass.as_deref_mut() {
+                        fill_row_color(&mut glass[span], *white, cov);
+                    }
+                }
             }
         };
         let _ = res;
@@ -849,7 +975,6 @@ impl<'a> SkiaPainter<'a> {
             if !edge {
                 continue;
             }
-            // 圆角带里两头的 c 列:覆盖率按像素中心到圆心的距离算。
             let py = y as f32 + 0.5;
             let dy = ((t as f32 + rad) - py).max(py - (b as f32 - rad)).max(0.0);
             for x in (l..(l + c).min(r)).chain((r - c).max(l + c)..r) {
@@ -925,7 +1050,6 @@ impl<'a> SkiaPainter<'a> {
         } else {
             Interior::new(r, rad, 0.0)
         };
-        // 形状 S 在像素 (px, py) 的（模糊后）覆盖率。
         let shape = |px: i32, py: i32, x: f32, y: f32| -> f32 {
             if !shape_ok {
                 return 0.0;
@@ -981,6 +1105,10 @@ impl<'a> SkiaPainter<'a> {
     }
 }
 
+fn image_pattern(pixmap: &Pixmap, opacity: f32, xf: Transform) -> Shader<'_> {
+    Pattern::new(pixmap.as_ref(), SpreadMode::Pad, FilterQuality::Bilinear, opacity, xf)
+}
+
 fn rrect_path(d: DRect, radius: f32) -> Option<Path> {
     let mut pb = PathBuilder::new();
     push_rounded_rect(&mut pb, d.l, d.t, d.r, d.b, radius);
@@ -997,7 +1125,6 @@ fn push_rounded_rect(pb: &mut PathBuilder, l: f32, t: f32, r: f32, b: f32, radiu
         pb.close();
         return;
     }
-    // 用三次贝塞尔近似四分之一圆。
     let k = rad * (1.0 - 0.552_284_8);
     pb.move_to(l + rad, t);
     pb.line_to(r - rad, t);
@@ -1027,6 +1154,12 @@ impl Painter for SkiaPainter<'_> {
         if self.snapped() && rad >= 0.5 && self.fill_rrect_fast(d, rad, brush) {
             return;
         }
+        if matches!(brush, Brush::Backdrop) && self.glass.is_some() {
+            if let Some(path) = rrect_path(d, rad) {
+                self.fill_glass_path(&path, FillRule::Winding);
+            }
+            return;
+        }
         let Some(paint) = self.paint_for(brush) else { return };
         if let Some(path) = rrect_path(d, rad) {
             self.fill_skia_path(&path, FillRule::Winding, &paint);
@@ -1050,7 +1183,6 @@ impl Painter for SkiaPainter<'_> {
         };
         let rad = radius * self.k();
         if i.l >= i.r || i.t >= i.b {
-            // 边框比矩形还粗：直接填满。
             let Some(paint) = self.paint_for(brush) else { return };
             if let Some(path) = rrect_path(o, rad) {
                 self.fill_skia_path(&path, FillRule::Winding, &paint);
@@ -1083,7 +1215,6 @@ impl Painter for SkiaPainter<'_> {
             return;
         }
         let Some(paint) = self.paint_for(brush) else { return };
-        // 外轮廓减内轮廓（奇偶填充），比描边更容易对齐像素。
         let mut pb = PathBuilder::new();
         push_rounded_rect(&mut pb, o.l, o.t, o.r, o.b, rad);
         push_rounded_rect(&mut pb, i.l, i.t, i.r, i.b, (rad - wpx).max(0.0));
@@ -1110,7 +1241,6 @@ impl Painter for SkiaPainter<'_> {
         let a = self.xf();
         let s = self.scale;
         let k = a.scale * s;
-        // 文字框原点的窗口物理坐标。不缩放时纵向对齐到整像素，横向保留小数交给 cosmic-text 的亚像素分档。
         let (ox, oy) = if self.snapped() {
             (
                 origin.x * s + (a.dx * s).round(),
@@ -1144,25 +1274,30 @@ impl Painter for SkiaPainter<'_> {
         if iw <= 0.0 || ih <= 0.0 || opacity <= 0.0 {
             return;
         }
-        // 1:1 贴到整像素位置（合成层缓存的常见情况）：逐像素按透明度混合，不走重新采样的着色器。
         if self.snapped() && (d.width() - iw).abs() < 0.5 && (d.height() - ih).abs() < 0.5 {
             self.blit(image, d.l.round() as i32, d.t.round() as i32, opacity);
             return;
         }
-        let shader = Pattern::new(
-            image.pixmap.as_ref(),
-            SpreadMode::Pad,
-            FilterQuality::Bilinear,
-            opacity,
-            Transform::from_row(d.width() / iw, 0.0, 0.0, d.height() / ih, d.l, d.t),
-        );
+        let xf = Transform::from_row(d.width() / iw, 0.0, 0.0, d.height() / ih, d.l, d.t);
+        let Some(path) = rrect_path(d, 0.0) else { return };
+        if let Some(glass) = image.glass.as_ref().filter(|_| self.glass.is_some()) {
+            let erase = Paint {
+                shader: image_pattern(glass, opacity, xf),
+                blend_mode: BlendMode::DestinationOut,
+                ..Paint::default()
+            };
+            self.fill_skia_path(&path, FillRule::Winding, &erase);
+            let paint = Paint {
+                shader: image_pattern(glass, opacity * self.layer_opacity(), xf),
+                ..Paint::default()
+            };
+            self.fill_glass_channel(&path, FillRule::Winding, &paint);
+        }
         let paint = Paint {
-            shader,
+            shader: image_pattern(&image.pixmap, opacity, xf),
             ..Paint::default()
         };
-        if let Some(path) = rrect_path(d, 0.0) {
-            self.fill_skia_path(&path, FillRule::Winding, &paint);
-        }
+        self.fill_skia_path(&path, FillRule::Winding, &paint);
     }
 
     fn draw_line(&mut self, from: Point, to: Point, width: f32, color: Color) {
@@ -1222,13 +1357,15 @@ impl Painter for SkiaPainter<'_> {
             painter::FillRule::NonZero => FillRule::Winding,
             painter::FillRule::EvenOdd => FillRule::EvenOdd,
         };
+        if matches!(brush, Brush::Backdrop) && self.glass.is_some() {
+            return self.fill_glass_path(&path, rule);
+        }
         self.fill_skia_path(&path, rule, &paint);
     }
 
     fn stroke_path(&mut self, path: &VPath, at: Affine, stroke: &StrokeStyle, brush: &Brush) {
         let Some(paint) = self.paint_for(brush) else { return };
         let Some(path) = self.device_path(path, at) else { return };
-        // 线宽和虚线长度都在路径坐标系里，先按变换的缩放、再按屏幕缩放换成物理像素。
         let k = at.scale * self.k();
         let dash = (stroke.dash.len() >= 2 && stroke.dash.len().is_multiple_of(2))
             .then(|| StrokeDash::new(stroke.dash.iter().map(|d| d * k).collect(), stroke.dash_offset * k))
@@ -1271,7 +1408,6 @@ impl Painter for SkiaPainter<'_> {
             return;
         };
         if self.snapped() && rad < 0.5 {
-            // 整数矩形：不需要新蒙版，继承上一层的（如果有）。
             let full = parent_full && bbox == parent_rect;
             self.clips.push(Clip::new(bbox, parent_mask, full));
             return;
@@ -1325,7 +1461,6 @@ impl Painter for SkiaPainter<'_> {
         let mut buf = self.res.layer_pool.pop().unwrap_or_default();
         buf.clear();
         buf.resize(len, 0);
-        // 图层内容只可能落在当前裁剪区里；`rect` 只是提示（子元素的阴影之类可能画到它外面），不用来缩小范围。
         let _ = rect;
         let area = self.clip().rect;
         self.layers.push(Layer {
@@ -1353,14 +1488,12 @@ impl Painter for SkiaPainter<'_> {
     }
 }
 
-/// `a * b / 255`，四舍五入。
 #[inline]
 fn mul255(a: u32, b: u32) -> u32 {
     let t = a * b + 128;
     (t + (t >> 8)) >> 8
 }
 
-/// 纯色按透明度 `a`（0–255）source-over 混合进一个预乘像素。
 #[inline]
 fn blend_px(dst: &mut [u8], r: u32, g: u32, b: u32, a: u32) {
     let inv = 255 - a;
@@ -1370,7 +1503,6 @@ fn blend_px(dst: &mut [u8], r: u32, g: u32, b: u32, a: u32) {
     dst[3] = (a + mul255(dst[3] as u32, inv)) as u8;
 }
 
-/// 两路并行的 `x * k / 255`（四舍五入）:`px` 的四个通道各占一个字节。
 #[inline(always)]
 fn scale_px(px: u32, k: u32) -> u32 {
     let rb = (px & 0x00FF_00FF) * k + 0x0080_0080;
@@ -1380,7 +1512,6 @@ fn scale_px(px: u32, k: u32) -> u32 {
     rb | ag
 }
 
-/// 逐通道饱和相加。
 #[inline(always)]
 fn add_px(a: u32, b: u32) -> u32 {
     let sat = |v: u32| (v | (((v >> 8) & 0x0001_0001) * 255)) & 0x00FF_00FF;
@@ -1389,8 +1520,6 @@ fn add_px(a: u32, b: u32) -> u32 {
     sat(rb) | (sat(ag) << 8)
 }
 
-/// 预乘像素 `src` 先乘以不透明度 `k`（0–255），再 source-over 到预乘像素 `dst` 上。
-/// 小端字节序下 alpha 在最高字节。没有分支，编译器能把外层循环向量化。
 #[inline(always)]
 fn over_px(src: u32, dst: u32, k: u32) -> u32 {
     let s = scale_px(src, k);
@@ -1402,7 +1531,6 @@ fn px_at(bytes: &[u8]) -> u32 {
     u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
 }
 
-/// 一行预乘 RGBA 按不透明度 `k`（0–255）source-over 到另一行上。两行等长。
 fn over_row(dst: &mut [u8], src: &[u8], k: u32) {
     if k >= 255 {
         for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
@@ -1416,7 +1544,6 @@ fn over_row(dst: &mut [u8], src: &[u8], k: u32) {
     }
 }
 
-/// 用同一个预乘颜色铺满一段，按 `cov`（0–255）的覆盖率混合。
 fn fill_row_color(dst: &mut [u8], color: u32, cov: u32) {
     let s = if cov >= 255 { color } else { scale_px(color, cov) };
     if s >> 24 == 255 {
@@ -1432,8 +1559,6 @@ fn fill_row_color(dst: &mut [u8], color: u32, cov: u32) {
     }
 }
 
-/// 把低分辨率的模糊背景（每个像素盖住窗口里 `f × f` 个像素）双线性放大成整个窗口大小的不透明图。
-/// 采样规则与 [`Brush::Backdrop`] 的着色器一致（像素中心对齐、边缘取最近的像素）。
 fn upsample_backdrop(low: &Pixmap, f: usize, w: usize, h: usize) -> Option<Pixmap> {
     let (lw, lh) = (low.width() as usize, low.height() as usize);
     if lw == 0 || lh == 0 || f == 0 {
@@ -1441,7 +1566,6 @@ fn upsample_backdrop(low: &Pixmap, f: usize, w: usize, h: usize) -> Option<Pixma
     }
     let src = low.data();
     let mut out = Pixmap::new(w as u32, h as u32)?;
-    // (左邻、右邻、右邻的权重 0–256),水平方向只和列有关,先算好。
     let axis = |n: usize, limit: usize| -> Vec<(usize, usize, u32)> {
         (0..n)
             .map(|i| {
@@ -1471,7 +1595,6 @@ fn upsample_backdrop(low: &Pixmap, f: usize, w: usize, h: usize) -> Option<Pixma
     Some(out)
 }
 
-/// 渐变在 `t`（0–1）处的预乘颜色。色标之间在非预乘空间里插值（与 tiny-skia 一致）。
 fn gradient_color(stops: &[GradientStop], t: f32) -> u32 {
     let (Some(first), Some(last)) = (stops.first(), stops.last()) else {
         return 0;
@@ -1498,11 +1621,6 @@ fn gradient_color(stops: &[GradientStop], t: f32) -> u32 {
     ])
 }
 
-/// 文字覆盖率的校正表。
-///
-/// 混合在 sRGB 空间里做（没有转到线性空间），浅色字压在深色底上时，半覆盖的边缘像素偏暗，
-/// 笔画看起来比实际细；深色字在浅底上则相反。这里按文字颜色的亮度把覆盖率提一提：
-/// 白字相当于 `覆盖率^(1/1.8)`（接近线性空间混合的结果），黑字不变。
 fn coverage_lut(color: Color) -> [u8; 256] {
     let lum = (0.2126 * color.r as f32 + 0.7152 * color.g as f32 + 0.0722 * color.b as f32) / 255.0;
     let t = ((lum - 0.35) / 0.65).clamp(0.0, 1.0);
@@ -1514,8 +1632,6 @@ fn coverage_lut(color: Color) -> [u8; 256] {
     lut
 }
 
-/// 把一个字形位图按 source-over 混合进像素图（像素图是预乘 alpha）。
-/// `mask` 是当前裁剪层的逐像素覆盖率（与像素图同尺寸），没有时只按 `clip` 矩形裁剪。
 fn blend_glyph(
     pixmap: &mut PixmapMut,
     image: &cosmic_text::SwashImage,
@@ -1560,7 +1676,6 @@ fn blend_glyph(
             }
         }
         SwashContent::Color => {
-            // 彩色字形（emoji）：自带颜色，按非预乘 RGBA 处理，只套用文字颜色的透明度。
             for py in y0..y1 {
                 let src_row = ((py - y) * w) as usize;
                 let dst_row = py as usize * stride;
@@ -1581,7 +1696,6 @@ fn blend_glyph(
                 }
             }
         }
-        // 请求的是灰度格式，不会出现子像素蒙版。
         SwashContent::SubpixelMask => {}
     }
 }
@@ -1592,7 +1706,6 @@ mod tests {
     use crate::text::FontSetup;
 
     fn texts() -> TextSystem {
-        // 不加载任何字体：这些测试不画字。
         TextSystem::new(&FontSetup::default())
     }
 
@@ -1616,12 +1729,9 @@ mod tests {
                 p.draw_inner_shadow(rect, 10.0, &Shadow::new(0.0, hl, 0.0, Color::BLACK));
             });
             let s = |v: f32| (v * scale) as u32;
-            // 矩形内部（离边缘远处）没有被阴影弄脏：外阴影挖空了形状本身。
             assert_eq!(px(&c, s(100.0), s(80.0)), [255, 255, 255, 255], "scale {scale}");
-            // 矩形正下方有阴影。
             let below = px(&c, s(100.0), s(120.0));
             assert!(below[0] < 230, "scale {scale}: {below:?}");
-            // 顶部内边：正好一行物理像素被画黑，下一行不受影响。
             let top = (50.0 * scale).round() as u32;
             assert_eq!(px(&c, s(100.0), top), [0, 0, 0, 255], "scale {scale}");
             assert_eq!(px(&c, s(100.0), top + 1), [255, 255, 255, 255], "scale {scale}");
@@ -1653,7 +1763,6 @@ mod tests {
             downsample: 1,
         });
         c.resize(100, 50);
-        // 两个脏区分别画：结果应和整窗一次画完一致（背景按窗口坐标取样）。
         let draw = |p: &mut dyn Painter| {
             p.push_transform(Affine::translate(0.4, 0.0));
             p.fill(Rect::new(10.0, 10.0, 80.0, 30.0), 0.0, &Brush::Backdrop);
@@ -1663,12 +1772,62 @@ mod tests {
         c.paint_region(DeviceRect::new(50, 0, 50, 50), 1.0, &mut text, draw);
         assert_eq!(px(&c, 20, 20), [200, 0, 0, 255]);
         assert_eq!(px(&c, 80, 20), [0, 0, 200, 255]);
-        // 不含缩放的平移按整像素取整：0.4 像素的平移不产生半透明边缘。
         assert_eq!(px(&c, 10, 20), [200, 0, 0, 255]);
     }
 
-    /// 手动跑的耗时测量:`cargo test --release -p cairn-ui-render bench_ -- --ignored --nocapture`。
-    /// 用 1178 × 736、1 倍缩放的窗口,量一帧里各种操作大概要多久(ms,取多次的平均)。
+    #[test]
+    fn compositing_leaves_background_and_glass_to_gpu() {
+        #[derive(Debug)]
+        struct Red;
+        impl Scene for Red {
+            fn paint(&self, p: &mut dyn Painter, size: Size) {
+                p.fill_rect(Rect::new(0.0, 0.0, size.width, size.height), Color::rgb(200, 0, 0));
+            }
+        }
+        let mut text = texts();
+        let mut c = Canvas::new();
+        c.set_background(Background::Scene(Rc::new(Red)));
+        c.set_compositing(true);
+        c.resize(100, 50);
+        assert_eq!(c.scene_status(1.0), SceneStatus::Missing);
+        c.paint_scene(1.0, &mut text);
+        assert_eq!(c.scene_status(1.0), SceneStatus::Current);
+        let (scene, ..) = c.scene_image().unwrap();
+        assert_eq!(&scene[..4], &[200, 0, 0, 255]);
+
+        let tint = Color::rgbaf(255, 255, 255, 0.5);
+        c.paint_region(DeviceRect::new(0, 0, 100, 50), 1.0, &mut text, |p| {
+            p.fill_rect(Rect::new(0.0, 0.0, 100.0, 50.0), Color::rgbaf(0, 0, 0, 0.3));
+            for (x, radius) in [(5.0, 0.0), (55.0, 8.0)] {
+                let r = Rect::new(x, 10.0, 40.0, 30.0);
+                p.fill(r, radius, &Brush::Backdrop);
+                p.fill(r, radius, &Brush::Solid(tint));
+            }
+        });
+        let glass = |c: &Canvas, x: u32, y: u32| c.glass()[(y * c.width() + x) as usize];
+        for x in [25, 75] {
+            assert_eq!(glass(&c, x, 25), 255);
+            assert_eq!(px(&c, x, 25), [128, 128, 128, 128]);
+        }
+        assert_eq!(glass(&c, 50, 2), 0);
+        assert_eq!(px(&c, 50, 2), [0, 0, 0, 77]);
+
+        let image = c
+            .render_layer(DeviceRect::new(0, 0, 40, 20), 1.0, &mut text, |p| {
+                p.fill(Rect::new(0.0, 0.0, 40.0, 20.0), 6.0, &Brush::Backdrop);
+            })
+            .unwrap();
+        assert!(image.glass.is_some());
+        c.paint_region(DeviceRect::new(0, 0, 100, 50), 1.0, &mut text, |p| {
+            p.draw_image(&image, Rect::new(30.0, 20.0, 40.0, 20.0), 1.0);
+        });
+        assert_eq!(glass(&c, 50, 30), 255);
+        assert_eq!(glass(&c, 10, 30), 0);
+
+        c.resize(120, 50);
+        assert_eq!(c.scene_status(1.0), SceneStatus::Stale);
+    }
+
     #[test]
     #[ignore = "耗时测量,手动跑"]
     fn bench_paint_costs() {
@@ -1697,7 +1856,6 @@ mod tests {
         c.resize(1178, 736);
         let region = DeviceRect::new(168, 36, 842, 590);
         let panel = Rect::new(168.0, 36.0, 842.0, 590.0);
-        // 一张和面板一样大的位图,模拟合成层缓存。
         let mut cache_px = vec![0u8; 842 * 590 * 4];
         for (i, px) in cache_px.chunks_exact_mut(4).enumerate() {
             let a = if i % 7 == 0 { 120 } else { 220 };
@@ -1706,7 +1864,6 @@ mod tests {
         let image = Image::from_rgba8(842, 590, cache_px).unwrap();
 
         let mut time = |name: &str, f: &mut dyn FnMut(&mut dyn Painter)| {
-            // 先预热一次(阴影蒙版、字形之类的缓存)。
             c.paint_region(region, 1.0, &mut text, |p| f(p));
             let n = 20;
             let t = Instant::now();
@@ -1785,7 +1942,6 @@ mod tests {
                 );
             }
         });
-        // 对照:tiny-skia 自己的 draw_pixmap(整数平移、最近邻)贴同一张位图要多久。
         {
             let mut target = Pixmap::new(1178, 736).unwrap();
             let t = Instant::now();
@@ -1846,13 +2002,11 @@ mod tests {
             c.set_background(Background::Solid(Color::WHITE));
             let (w, h) = ((100.0 * scale) as u32, (100.0 * scale) as u32);
             c.resize(w, h);
-            // 设计坐标 0–10 的方框映射到窗口里 (20, 20) 起的 40 × 40。
             let at = Affine {
                 scale: 4.0,
                 dx: 20.0,
                 dy: 20.0,
             };
-            // 外圈顺时针、内圈逆时针：奇偶规则下内圈被挖空。
             let ring = Vector::parse("M0 0H10V10H0Z M3 3V7H7V3Z").unwrap();
             let line = Vector::parse("M0 12 H10").unwrap();
             c.paint_region(DeviceRect::new(0, 0, w, h), scale, &mut text, |p| {
@@ -1865,10 +2019,8 @@ mod tests {
                 );
             });
             let s = |v: f32| (v * scale) as u32;
-            // 圆环的边：红色；中心被挖空：仍是白色。
             assert_eq!(px(&c, s(23.0), s(40.0)), [200, 0, 0, 255], "scale {scale}");
             assert_eq!(px(&c, s(40.0), s(40.0)), [255, 255, 255, 255], "scale {scale}");
-            // 线宽 1 个设计单位 = 4 个逻辑像素：线在 y = 20 + 12 × 4 = 68 附近，上下各 2 像素。
             assert_eq!(px(&c, s(40.0), s(68.0)), [0, 0, 200, 255], "scale {scale}");
             assert_eq!(px(&c, s(40.0), s(60.0)), [255, 255, 255, 255], "scale {scale}");
         }
@@ -1885,7 +2037,6 @@ mod tests {
             p.fill_rect(Rect::new(0.0, 0.0, 100.0, 100.0), Color::BLACK);
             p.pop_clip();
         });
-        // 角落在圆角外，保持白色；中心被填黑。
         assert_eq!(px(&c, 1, 1), [255, 255, 255, 255]);
         assert_eq!(px(&c, 50, 50), [0, 0, 0, 255]);
     }

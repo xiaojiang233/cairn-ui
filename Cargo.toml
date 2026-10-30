@@ -5,7 +5,6 @@ members = ["crates/*", "examples/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-# cosmic-text 0.19 要求 1.89。
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/xiaojiang233/cairn-ui"
@@ -17,17 +16,15 @@ cairn-ui-platform = { path = "crates/cairn-ui-platform" }
 cairn-ui-render = { path = "crates/cairn-ui-render" }
 cairn-ui-layout = { path = "crates/cairn-ui-layout" }
 
-# 依赖都关掉默认特性，只开用得上的，控制最终 exe 体积。
-# winit / softbuffer 的 Linux 后端在 cairn-ui-platform 里按 target 单独打开。
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 softbuffer = { version = "0.4.8", default-features = false }
-# 去掉 png-format（会拉进 png + flate2 + miniz）。
+glutin = { version = "0.32.3", default-features = false, features = ["wgl"] }
+glutin-winit = { version = "0.5.0", default-features = false, features = ["wgl"] }
+glow = "0.18.0"
+raw-window-handle = "0.6.2"
 tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "simd"] }
-# 去掉 fontconfig；字体目录由 cairn-ui-platform 提供。
 cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash"] }
-# 只要 flexbox；grid / block / float / calc 暂时用不上。
 taffy = { version = "0.15.1", default-features = false, features = ["std", "taffy_tree", "flexbox"] }
-# 下面三个已经在依赖树里（taffy / fontdb / cosmic-text 用到），直接依赖不增加体积。
 slotmap = "1.1"
 unicode-segmentation = "1.13"
 sys-locale = "0.3"
@@ -40,8 +37,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-# 渲染层的逐像素循环（背景模糊、阴影、噪点、混合）在未优化的 debug 构建里要慢约 10 倍，
-# 动画会卡顿。依赖和渲染层在 dev 下也优化，自己的其余代码保持 debug 方便调试。
 [profile.dev.package."*"]
 opt-level = 2
 
@@ -55,9 +50,6 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
-# 整体按体积优化（opt-level = "z"）会让 CPU 渲染的逐像素循环慢约 4 倍：悬停动画一帧（1.5 倍缩放、
-# 27 万像素）实测 22 ms，超出 60 Hz 的 16.7 ms 预算。只把渲染热点（tiny-skia 的光栅管线和
-# cairn-ui-render 的模糊 / 阴影 / 噪点循环）提到 opt-level = 2：一帧约 6 ms，exe 增大约 95 KiB。
 [profile.release.package.tiny-skia]
 opt-level = 2
 

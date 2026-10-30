@@ -1,7 +1,3 @@
-//! 运行时核心：持有应用状态与控件树，处理输入、重建界面、布局、按脏区重绘、驱动动画帧。
-//!
-//! 不直接依赖窗口：平台服务通过 [`Host`] 注入，所以同一套逻辑也能在测试里无窗口运行。
-
 use std::any::Any;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -9,6 +5,7 @@ use std::time::{Duration, Instant};
 use cairn_ui_platform::{
     self as platform, CursorIcon, Key, KeyEvent, Modifiers, NamedKey, PixelRect, PointerButton, ResizeEdge,
 };
+use cairn_ui_render::SceneStatus;
 
 use crate::app::FileDrop;
 use crate::damage::{self, Damage};
@@ -19,18 +16,16 @@ use crate::tree::{Tree, WidgetId};
 use crate::widget::{Event, EventCx, EventOutput, LayoutCx, PaintCx};
 use crate::{Affine, Background, Canvas, DeviceRect, Image, Painter, Point, Rect, Size, TextSystem};
 
-/// 重绘时脏区外扩的距离（逻辑像素），覆盖抗锯齿边缘和画在控件外面的焦点框。
 const PAINT_MARGIN: f32 = 4.0;
-/// 无边框窗口四周用来拖动改变大小的一圈的宽度，以及四个角的热区边长（逻辑像素）。
 const RESIZE_BAND: f32 = 6.0;
 const RESIZE_CORNER: f32 = 14.0;
+const SCENE_SETTLE: Duration = Duration::from_millis(150);
 
 pub(crate) type ViewBox<S> = Box<dyn Fn(&S) -> El<S>>;
 pub(crate) type Update<S> = Box<dyn FnOnce(&mut S) + Send>;
 pub(crate) type FileDropFn<S> = Box<dyn Fn(&mut S, FileDrop)>;
 pub(crate) type ThemeFn<S> = Box<dyn Fn(&mut S) -> Option<Theme>>;
 
-/// 时间来源。真实窗口用系统时钟；测试用手动推进的虚拟时钟，动画结果可以精确复现。
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Clock {
     Real,
@@ -56,9 +51,7 @@ pub(crate) struct Ui<S: 'static> {
     phys: (u32, u32),
     pub canvas: Canvas,
     damage: Damage,
-    /// 指针下最深层的控件。
     hovered: Option<WidgetId>,
-    /// 从 `hovered` 到根的路径：这些控件都处于“悬停”状态。
     hover_path: Vec<WidgetId>,
     captured: Option<WidgetId>,
     pub focused: Option<WidgetId>,
@@ -73,29 +66,22 @@ pub(crate) struct Ui<S: 'static> {
     double_click_time: Duration,
     double_click_distance: f32,
     pub clock: Clock,
-    /// 上一帧请求了下一帧的控件（动画进行中）。
     animating: Vec<WidgetId>,
-    /// 下一帧动画的时间点。
     next_frame: Option<Instant>,
-    /// 窗口没有系统边框且可以调整大小：四周一圈由这里处理成“拖动改变大小”。
     resize_border: bool,
     maximized: bool,
     file_drop: Option<FileDropFn<S>>,
-    /// 应用通过它在运行中换主题（[`crate::App::theme_from`]）。
     theme_source: Option<ThemeFn<S>>,
     reduce_motion: bool,
-    /// 上一帧在动画中、且带变换或半透明的控件，以及它当时的变换：它们影响整棵子树，下一帧要重画整棵子树。
     subtree_anim: Vec<(WidgetId, Affine)>,
-    /// 合成层缓存（[`crate::Widget::cache_layer`]）。
     layer_cache: HashMap<WidgetId, CachedLayer>,
-    /// 内容版本：状态、布局、重绘请求、主题有任何变化就加一，缓存的版本对不上就重画。
     epoch: u64,
+    resized: Option<(Instant, bool)>,
+    scene_due: Option<Instant>,
 }
 
-/// 一张合成层缓存：子树在不做本控件变换、不透明时的样子。
 pub(crate) struct CachedLayer {
     image: Image,
-    /// 位图覆盖的范围（逻辑像素，窗口坐标）。
     rect: Rect,
     epoch: u64,
     scale: f32,
@@ -148,6 +134,8 @@ impl<S: 'static> Ui<S> {
             subtree_anim: Vec::new(),
             layer_cache: HashMap::new(),
             epoch: 0,
+            resized: None,
+            scene_due: None,
         };
         ui.tree.set_viewport(ui.logical_size());
         ui.rebuild_view();
@@ -156,7 +144,6 @@ impl<S: 'static> Ui<S> {
         ui
     }
 
-    /// 窗口没有系统边框时由运行时处理四周的缩放边（`resize_border`），以及窗口当前是否最大化。
     pub fn set_window_frame(&mut self, resize_border: bool, maximized: bool) {
         self.resize_border = resize_border;
         self.maximized = maximized;
@@ -171,8 +158,6 @@ impl<S: 'static> Ui<S> {
         self.reduce_motion = reduce_motion;
     }
 
-    /// 应用放进状态里的新主题：换背景和模糊参数，所有控件重新按新主题补全样式、重新测量，整窗重画。
-    /// 控件本身保留（焦点、滚动位置、正在拖动的滑块都不受影响）。
     fn poll_theme(&mut self) {
         let Some(f) = &self.theme_source else { return };
         let Some(mut theme) = f(&mut self.state) else { return };
@@ -191,7 +176,6 @@ impl<S: 'static> Ui<S> {
         self.epoch += 1;
     }
 
-    /// 指针在无边框窗口四周的缩放边上时，返回对应的边或角。最大化时没有缩放边。
     fn resize_edge(&self, p: Point) -> Option<ResizeEdge> {
         if !self.resize_border || self.maximized {
             return None;
@@ -231,7 +215,6 @@ impl<S: 'static> Ui<S> {
         self.scale
     }
 
-    /// 还有动画在进行（下一帧已经排上）。
     pub fn animating(&self) -> bool {
         self.next_frame.is_some()
     }
@@ -239,8 +222,6 @@ impl<S: 'static> Ui<S> {
     pub fn next_frame(&self) -> Option<Instant> {
         self.next_frame
     }
-
-    // ---------------------------------------------------------------- 构建与布局
 
     fn rebuild_view(&mut self) {
         self.rebuild = false;
@@ -251,8 +232,6 @@ impl<S: 'static> Ui<S> {
         };
         let changes = self.tree.changes;
         self.tree.set_content(&mut cx, el, &mut self.damage);
-        // 重建后画面没有任何变化（后台推来的状态没影响界面）就不让合成层缓存作废，
-        // 否则动画进行中每来一次无关的状态更新，整个面板都要重画一遍。
         if self.tree.changes != changes {
             self.epoch += 1;
         }
@@ -294,9 +273,6 @@ impl<S: 'static> Ui<S> {
         }
     }
 
-    // ---------------------------------------------------------------- 事件分发
-
-    /// 把事件交给一个控件，并处理它在回调里提出的请求。返回是否已处理。
     fn send(&mut self, host: &mut dyn Host, id: WidgetId, event: &Event) -> bool {
         let Some(node) = self.tree.nodes.get_mut(id) else {
             return false;
@@ -329,7 +305,6 @@ impl<S: 'static> Ui<S> {
         if out.arrange {
             self.tree.needs_arrange = true;
         }
-        // 脏区先去掉被祖先（滚动容器）裁剪掉的部分：滚出视口的控件请求重绘不该触发视口外的重画。
         let visual = (out.change.paint && node.laid_out).then(|| node.visual(&self.theme));
         for r in visual.into_iter().chain(out.damage) {
             self.tree.damage_rect(id, r, &self.theme, &mut self.damage);
@@ -348,7 +323,6 @@ impl<S: 'static> Ui<S> {
         out.handled
     }
 
-    /// 从 `target` 开始分发，未处理就交给父控件（冒泡）。返回处理了事件的控件。
     fn dispatch(&mut self, host: &mut dyn Host, target: WidgetId, event: &Event, bubble: bool) -> Option<WidgetId> {
         let path = if bubble {
             self.tree.ancestors(target)
@@ -406,8 +380,6 @@ impl<S: 'static> Ui<S> {
             self.hovered = new;
             let new_path = new.map(|h| self.tree.ancestors(h)).unwrap_or_default();
             let old_path = std::mem::replace(&mut self.hover_path, new_path.clone());
-            // 是否需要重画由控件自己决定（有悬停效果的控件在 Enter / Leave 里请求重绘），
-            // 否则鼠标划过大容器时会整块重画。离开从里往外发，进入从外往里发。
             for id in old_path.iter().filter(|id| !new_path.contains(id)) {
                 self.send(host, *id, &Event::PointerLeave);
             }
@@ -439,7 +411,6 @@ impl<S: 'static> Ui<S> {
     fn pointer_button(&mut self, host: &mut dyn Host, button: PointerButton, pressed: bool) {
         let Some(pos) = self.pointer else { return };
         self.layout();
-        // 缩放边优先于下面的控件：交给系统的缩放循环，控件收不到这次按下。
         if pressed
             && button == PointerButton::Left
             && let Some(edge) = self.resize_edge(pos)
@@ -461,7 +432,6 @@ impl<S: 'static> Ui<S> {
             };
             self.last_click = Some((now, pos, count));
             let hit = self.tree.hit_test(pos, &self.theme);
-            // 点到可获得焦点的控件（或其子元素）就把焦点给它，点到别处则清除焦点。
             let focus = hit.and_then(|h| {
                 self.tree
                     .ancestors(h)
@@ -470,7 +440,6 @@ impl<S: 'static> Ui<S> {
             });
             self.set_focus(host, focus, false);
             if let Some(h) = hit {
-                // 处理了按下事件的控件在松开前独占指针事件（拖选文字、按钮按住后移出等）。
                 self.captured = self.dispatch(host, h, &Event::PointerDown { pos, button, count }, true);
             }
         } else {
@@ -558,7 +527,6 @@ impl<S: 'static> Ui<S> {
 
     pub fn set_size(&mut self, width: u32, height: u32, scale: f32) {
         if scale != self.scale {
-            // 字形按物理尺寸缓存，旧缩放下的字形不会再用到。
             self.text.clear_glyph_cache();
         }
         self.phys = (width, height);
@@ -566,17 +534,35 @@ impl<S: 'static> Ui<S> {
         self.tree.set_viewport(self.logical_size());
         self.damage.add_full();
         self.epoch += 1;
+        let now = self.clock.now();
+        let burst = self.resized.is_some_and(|(t, _)| now < t + SCENE_SETTLE);
+        self.resized = Some((now, burst));
     }
 
-    /// 定时器或动画帧的时间到了。
+    pub fn set_compositing(&mut self, on: bool) {
+        if on != self.canvas.compositing() {
+            self.canvas.set_compositing(on);
+            self.layer_cache.clear();
+            self.damage.add_full();
+        }
+    }
+
     pub fn fire_timers(&mut self, host: &mut dyn Host, now: Instant) {
-        if self.next_frame.is_some_and(|f| f <= now + std::time::Duration::from_millis(1)) {
+        if self
+            .scene_due
+            .is_some_and(|t| t <= now + std::time::Duration::from_millis(1))
+        {
+            self.scene_due = None;
+            host.request_redraw();
+        }
+        if self
+            .next_frame
+            .is_some_and(|f| f <= now + std::time::Duration::from_millis(1))
+        {
             self.next_frame = None;
             let subtree = std::mem::take(&mut self.subtree_anim);
             for id in std::mem::take(&mut self.animating) {
                 match subtree.iter().find(|(s, _)| *s == id) {
-                    // 变换、透明度作用于整棵子树。控件自己的可见范围按约定已经包含它的变换（悬停上浮之类），
-                    // 子孙的没有：重画子孙在上一帧变换前后覆盖的范围。
                     Some((_, t)) => {
                         self.damage_node(id);
                         if let Some(u) = self.tree.descendants_visual(id, &self.theme) {
@@ -608,12 +594,10 @@ impl<S: 'static> Ui<S> {
         self.after(host);
     }
 
-    /// 每批事件处理完之后：按需重建界面、重新布局，同步输入法与定时器，有脏区就请求重绘。
     pub fn after(&mut self, host: &mut dyn Host) {
         self.poll_theme();
         let stats = frame_stats();
         let (mut rebuilt, mut laid_out) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
-        // 重建和布局本身也可能触发事件（悬停变化），最多来回几轮。
         for _ in 0..4 {
             if self.rebuild {
                 let t = std::time::Instant::now();
@@ -644,9 +628,8 @@ impl<S: 'static> Ui<S> {
         }
     }
 
-    /// 告诉宿主下一次需要醒来的时间：最近的定时器或下一帧动画。
     fn schedule(&mut self, host: &mut dyn Host) {
-        let timer = self.timers.iter().map(|(t, _)| *t).min();
+        let timer = self.timers.iter().map(|(t, _)| *t).chain(self.scene_due).min();
         let wake = match (timer, self.next_frame) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -676,10 +659,6 @@ impl<S: 'static> Ui<S> {
         }
     }
 
-    // ---------------------------------------------------------------- 绘制
-
-    /// 重画所有脏区，返回本帧更新过的区域（物理像素）。没有脏区时返回空列表。
-    /// 画的过程中有控件请求了下一帧，就按显示器刷新间隔排上。
     pub fn render(&mut self, host: &mut dyn Host) -> Vec<DeviceRect> {
         let (w, h) = self.phys;
         if w == 0 || h == 0 {
@@ -693,7 +672,9 @@ impl<S: 'static> Ui<S> {
         }
         self.layout();
         let now = self.clock.now();
-        // 先更新合成层缓存：丢掉缓存时记下的脏区要在这一帧就画掉。
+        if self.canvas.compositing() {
+            self.update_scene(now);
+        }
         let cache_started = std::time::Instant::now();
         self.refresh_layer_caches(now);
         let cache_time = cache_started.elapsed();
@@ -726,8 +707,23 @@ impl<S: 'static> Ui<S> {
         regions
     }
 
-    /// 更新合成层缓存：不再需要缓存的控件丢掉缓存并重画那块区域；需要缓存而缓存缺失或过期的，
-    /// 把子树画进新的位图。
+    fn update_scene(&mut self, now: Instant) {
+        let due = match self.canvas.scene_status(self.scale) {
+            SceneStatus::Current => None,
+            SceneStatus::Missing => Some(now),
+            SceneStatus::Stale => match self.resized {
+                Some((t, true)) => Some(t + SCENE_SETTLE),
+                _ => Some(now),
+            },
+        };
+        if due.is_some_and(|t| t <= now) {
+            self.canvas.paint_scene(self.scale, &mut self.text);
+            self.scene_due = None;
+        } else {
+            self.scene_due = due;
+        }
+    }
+
     fn refresh_layer_caches(&mut self, now: Instant) {
         let wanted: Vec<WidgetId> = self
             .tree
@@ -762,7 +758,6 @@ impl<S: 'static> Ui<S> {
                 Some(d) => own.union(&d),
                 None => own,
             };
-            // 先裁到窗口里：位图只画得到窗口内的部分，记录的范围必须与位图一致，否则贴图时会被拉伸。
             let window = DeviceRect::new(0, 0, self.phys.0, self.phys.1);
             let Some(device) = DeviceRect::cover(&logical.inflate(PAINT_MARGIN, PAINT_MARGIN), s).intersection(&window)
             else {
@@ -808,7 +803,6 @@ impl<S: 'static> Ui<S> {
             };
             let before = st.animating.len();
             let image = canvas.render_layer(device, s, text, |p| paint_node(&mut st, id, p));
-            // 子树里还有控件在播自己的动画（悬停、选中的过渡……）：缓存只是这一刻的样子，下一帧要重画。
             let inner_moving = self.animating[before..].iter().any(|a| *a != id);
             if let Some(image) = image {
                 self.layer_cache.insert(
@@ -880,17 +874,14 @@ struct PaintState<'a, S: 'static> {
     window_focused: bool,
     window_maximized: bool,
     now: Instant,
-    /// 本次重画的区域（逻辑像素）。
     area: Rect,
     animating: &'a mut Vec<WidgetId>,
     timers: &'a mut Vec<(Instant, WidgetId)>,
     subtree_anim: &'a mut Vec<(WidgetId, Affine)>,
     layer_cache: &'a HashMap<WidgetId, CachedLayer>,
-    /// 正在为它画合成层缓存的控件：它自己的变换和透明度不画进缓存，也不能反过来用缓存。
     cache_root: Option<WidgetId>,
 }
 
-/// 按树的结构递归绘制：变换、裁剪作用于整棵子树。
 fn paint_node<S: 'static>(st: &mut PaintState<S>, id: WidgetId, p: &mut dyn Painter) {
     let theme = st.theme;
     let node = &mut st.tree.nodes[id];
@@ -930,15 +921,16 @@ fn paint_node<S: 'static>(st: &mut PaintState<S>, id: WidgetId, p: &mut dyn Pain
     if cx.frame_requested && (transformed || opacity < 1.0) && !st.subtree_anim.iter().any(|(w, _)| *w == id) {
         st.subtree_anim.push((id, transform));
     }
-    // 完全透明：整棵子树都不用画。
     if opacity <= 0.0 {
         if cx.frame_requested && !st.animating.contains(&id) {
             st.animating.push(id);
         }
         return;
     }
-    // 有合成层缓存：贴上缓存的位图，不再画子树。
-    if !caching && node.widget.cache_layer() && let Some(cache) = st.layer_cache.get(&id) {
+    if !caching
+        && node.widget.cache_layer()
+        && let Some(cache) = st.layer_cache.get(&id)
+    {
         if transformed {
             p.push_transform(transform);
         }
@@ -956,7 +948,6 @@ fn paint_node<S: 'static>(st: &mut PaintState<S>, id: WidgetId, p: &mut dyn Pain
         p.push_transform(transform);
     }
     if layered {
-        // 图层覆盖本次重画的整个区域：子元素（阴影之类）可能画到本控件外面。
         p.push_layer(st.area, opacity);
     }
     if visible {
@@ -964,13 +955,10 @@ fn paint_node<S: 'static>(st: &mut PaintState<S>, id: WidgetId, p: &mut dyn Pain
     }
     let clip = node.widget.clip_children(theme);
     let bounds = node.bounds;
-    // 裁剪子元素的控件本身不在重画区域内时，子元素也不可能在。
     if clip.is_none() || visible {
         match clip {
             None => paint_children(st, id, p),
             Some(radius) => {
-                // 子元素只可能画进裁剪区，所以重画区域也收窄到裁剪区：滚出视口的子元素在可见性判断里
-                // 直接被跳过。收窄后为空（只有本控件的阴影之类落在区域里）则子元素一个也不用画。
                 if let Some(inside) = st.area.intersection(&bounds) {
                     let outer = std::mem::replace(&mut st.area, inside);
                     p.push_rounded_clip(bounds, radius);
@@ -1011,7 +999,6 @@ fn apply_canvas_theme(canvas: &mut Canvas, theme: &Theme) {
     canvas.set_noise(theme.noise);
 }
 
-/// 设置了环境变量 `CAIRN_UI_FRAME_STATS` 时，每帧把绘制耗时和重画面积打到标准错误。
 fn frame_stats() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("CAIRN_UI_FRAME_STATS").is_some())
