@@ -107,6 +107,94 @@ pub(crate) fn gaussian_blur(data: &mut [u16], width: usize, height: usize, chann
     }
 }
 
+/// CairnPhi 的 9 抽头可分离高斯模糊（利用双线性插值采样 5 次等价于 9 抽头高斯滤波）。
+/// `passes` 为水平与垂直滤波的迭代次数，`spread` 为采样步进扩展因子。
+pub(crate) fn cairn_phi_gaussian_blur(
+    data: &mut [u16],
+    width: usize,
+    height: usize,
+    channels: usize,
+    passes: u32,
+    spread: f32,
+) {
+    if width == 0 || height == 0 || passes == 0 {
+        return;
+    }
+    let spread = spread.max(0.1);
+    let o1 = 1.3846153846 * spread;
+    let o2 = 3.2307692308 * spread;
+    let w0 = 0.2270270270f32;
+    let w1 = 0.3162162162f32;
+    let w2 = 0.0702702703f32;
+
+    let mut line_in = vec![0u16; width.max(height)];
+    let mut line_out = vec![0u16; width.max(height)];
+
+    for _ in 0..passes {
+        // 水平滤波
+        for y in 0..height {
+            let row = y * width * channels;
+            for c in 0..channels {
+                for x in 0..width {
+                    line_in[x] = data[row + x * channels + c];
+                }
+                blur_line_cairn_phi(&line_in[..width], &mut line_out[..width], o1, o2, w0, w1, w2);
+                for x in 0..width {
+                    data[row + x * channels + c] = line_out[x];
+                }
+            }
+        }
+        // 垂直滤波
+        for x in 0..width {
+            for c in 0..channels {
+                for y in 0..height {
+                    line_in[y] = data[(y * width + x) * channels + c];
+                }
+                blur_line_cairn_phi(&line_in[..height], &mut line_out[..height], o1, o2, w0, w1, w2);
+                for y in 0..height {
+                    data[(y * width + x) * channels + c] = line_out[y];
+                }
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn sample_clamped(src: &[u16], x: f32) -> f32 {
+    let last = (src.len() - 1) as f32;
+    let clamped = x.clamp(0.0, last);
+    let i0 = clamped.floor() as usize;
+    let i1 = (i0 + 1).min(src.len() - 1);
+    let f = clamped - i0 as f32;
+    src[i0] as f32 * (1.0 - f) + src[i1] as f32 * f
+}
+
+#[inline]
+fn blur_line_cairn_phi(
+    src: &[u16],
+    dst: &mut [u16],
+    o1: f32,
+    o2: f32,
+    w0: f32,
+    w1: f32,
+    w2: f32,
+) {
+    let n = src.len();
+    if n <= 1 {
+        if n == 1 {
+            dst[0] = src[0];
+        }
+        return;
+    }
+    for i in 0..n {
+        let fi = i as f32;
+        let c = src[i] as f32 * w0
+            + (sample_clamped(src, fi + o1) + sample_clamped(src, fi - o1)) * w1
+            + (sample_clamped(src, fi + o2) + sample_clamped(src, fi - o2)) * w2;
+        dst[i] = c.round().clamp(0.0, 65535.0) as u16;
+    }
+}
+
 /// 预乘 RGBA8 图像按 `factor` 倍降采样，每个低分辨率像素取对应方块的面积平均。
 /// 返回 16 位（`值 × 257`）的交错 RGBA 和新尺寸。
 pub(crate) fn downsample_rgba(src: &[u8], width: usize, height: usize, factor: usize) -> (Vec<u16>, usize, usize) {
@@ -152,6 +240,20 @@ pub(crate) fn saturate(data: &mut [u16], amount: f32) {
         px[0] = f(r);
         px[1] = f(g);
         px[2] = f(b);
+    }
+}
+
+/// 调整亮度（每个颜色通道乘以 `factor`，对应 CairnPhi 的背景亮度衰减系数，alpha 保持不变）。
+pub(crate) fn adjust_brightness(data: &mut [u16], factor: f32) {
+    if (factor - 1.0).abs() < 1e-3 {
+        return;
+    }
+    let factor = factor.max(0.0);
+    for px in data.chunks_exact_mut(4) {
+        let a = px[3] as f32;
+        px[0] = (px[0] as f32 * factor).clamp(0.0, a).round() as u16;
+        px[1] = (px[1] as f32 * factor).clamp(0.0, a).round() as u16;
+        px[2] = (px[2] as f32 * factor).clamp(0.0, a).round() as u16;
     }
 }
 
@@ -382,5 +484,39 @@ mod tests {
         assert!(cache.bytes <= 200_000 || cache.map.len() == 1);
         let c = cache.get(100, 50, 10.0, 8.0);
         assert!(!Rc::ptr_eq(&a, &c), "被淘汰后重新生成");
+    }
+
+    #[test]
+    fn cairn_phi_blur_conserves_energy_and_is_symmetric() {
+        let n = 101;
+        let mut data = vec![0u16; n * n * 4];
+        let mid = n / 2;
+        data[(mid * n + mid) * 4] = 60000;
+        data[(mid * n + mid) * 4 + 1] = 40000;
+        data[(mid * n + mid) * 4 + 2] = 20000;
+        data[(mid * n + mid) * 4 + 3] = 65535;
+
+        cairn_phi_gaussian_blur(&mut data, n, n, 4, 2, 1.0);
+
+        // 能量守恒：总和在边界效应外保持一致
+        let total_r: u64 = (0..n * n).map(|i| data[i * 4] as u64).sum();
+        assert!((total_r as i64 - 60000).abs() < 100, "total_r: {total_r}");
+
+        // 对称性：中心点周围上下左右对称
+        for d in 1..10 {
+            let left = data[(mid * n + (mid - d)) * 4];
+            let right = data[(mid * n + (mid + d)) * 4];
+            let top = data[((mid - d) * n + mid) * 4];
+            let bottom = data[((mid + d) * n + mid) * 4];
+            assert_eq!(left, right, "左右对称 d={d}");
+            assert_eq!(top, bottom, "上下对称 d={d}");
+            assert!((left as i32 - top as i32).abs() <= 1, "各向同性 d={d}");
+        }
+
+        // 亮度调节
+        adjust_brightness(&mut data, 0.95);
+        let adjusted_r: u64 = (0..n * n).map(|i| data[i * 4] as u64).sum();
+        let expected = (60000.0 * 0.95) as i64;
+        assert!((adjusted_r as i64 - expected).abs() < 100);
     }
 }

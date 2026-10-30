@@ -47,8 +47,8 @@ pub struct BackdropStyle {
 impl Default for BackdropStyle {
     fn default() -> Self {
         BackdropStyle {
-            blur: 40.0,
-            saturation: 1.8,
+            blur: 34.0,
+            saturation: 1.0,
             downsample: 4,
         }
     }
@@ -183,7 +183,14 @@ impl Canvas {
         let st = self.backdrop_style;
         let f = st.downsample.max(1) as usize;
         let (mut buf, lw, lh) = effects::downsample_rgba(pixmap.data(), self.width as usize, self.height as usize, f);
-        effects::gaussian_blur(&mut buf, lw, lh, 4, st.blur * scale / f as f32);
+        if st.blur > 0.0 {
+            // 采用 CairnPhi 的 9 抽头可分离高斯模糊算法与暗调衰减
+            let effective_passes = (st.blur * scale / 17.0).clamp(1.0, 6.0);
+            let passes = effective_passes.floor() as u32;
+            let spread = 1.0 + effective_passes.fract();
+            effects::cairn_phi_gaussian_blur(&mut buf, lw, lh, 4, passes, spread);
+            effects::adjust_brightness(&mut buf, 0.95);
+        }
         effects::saturate(&mut buf, st.saturation);
         let data: Vec<u8> = buf.iter().map(|&v| ((v as u32 + 128) / 257) as u8).collect();
         self.backdrop = IntSize::from_wh(lw as u32, lh as u32).and_then(|s| Pixmap::from_vec(data, s));
