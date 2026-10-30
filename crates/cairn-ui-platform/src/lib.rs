@@ -458,11 +458,15 @@ impl<H: Handler> Runner<H> {
 }
 
 impl<H: Handler> ApplicationHandler<UserPayload> for Runner<H> {
-    fn new_events(&mut self, event_loop: &ActiveEventLoop, _cause: StartCause) {
-        // 不只看 ResumeTimeReached：处理别的事件耗时较长时，定时点可能已经过了。
-        if let Some(at) = self.shared.wakeup
-            && Instant::now() >= at
-        {
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        // ResumeTimeReached 说明系统定时器已到点（可能因微秒级时钟抖动而比 at 略小几微秒）；
+        // 或者处理其他事件耗时较长时，即使 cause 不是 ResumeTimeReached，定时点也可能已经到了。
+        let timer_due = match (cause, self.shared.wakeup) {
+            (StartCause::ResumeTimeReached { .. }, Some(_)) => true,
+            (_, Some(at)) => Instant::now() + std::time::Duration::from_millis(1) >= at,
+            _ => false,
+        };
+        if timer_due {
             self.shared.wakeup = None;
             self.with_cx(event_loop, |h, cx, _| h.timer(cx));
         }

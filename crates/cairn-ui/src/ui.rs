@@ -570,7 +570,7 @@ impl<S: 'static> Ui<S> {
 
     /// 定时器或动画帧的时间到了。
     pub fn fire_timers(&mut self, host: &mut dyn Host, now: Instant) {
-        if self.next_frame.is_some_and(|f| f <= now) {
+        if self.next_frame.is_some_and(|f| f <= now + std::time::Duration::from_millis(1)) {
             self.next_frame = None;
             let subtree = std::mem::take(&mut self.subtree_anim);
             for id in std::mem::take(&mut self.animating) {

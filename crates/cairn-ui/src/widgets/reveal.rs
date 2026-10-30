@@ -237,7 +237,7 @@ impl<S: 'static> Widget<S> for Reveal<S> {
     }
 
     fn cache_layer(&self) -> bool {
-        self.moving
+        false
     }
 
     fn paint(&mut self, _cx: &mut PaintCx, _p: &mut dyn Painter) {}
