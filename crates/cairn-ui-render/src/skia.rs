@@ -189,7 +189,7 @@ impl Canvas {
             let passes = if st.blur >= 45.0 { 3 } else { 2 };
             let spread = (st.blur * scale / 14.0).clamp(1.2, 4.0);
             effects::cairn_phi_gaussian_blur(&mut buf, lw, lh, 4, passes, spread);
-            effects::adjust_brightness(&mut buf, 0.95);
+            effects::adjust_brightness(&mut buf, 0.98);
         }
         effects::saturate(&mut buf, st.saturation);
         let data: Vec<u8> = buf.iter().map(|&v| ((v as u32 + 128) / 257) as u8).collect();
