@@ -184,10 +184,10 @@ impl Canvas {
         let f = st.downsample.max(1) as usize;
         let (mut buf, lw, lh) = effects::downsample_rgba(pixmap.data(), self.width as usize, self.height as usize, f);
         if st.blur > 0.0 {
-            // 采用 CairnPhi 的 9 抽头可分离高斯模糊算法与暗调衰减
-            let effective_passes = (st.blur * scale / 17.0).clamp(1.0, 6.0);
-            let passes = effective_passes.floor() as u32;
-            let spread = 1.0 + effective_passes.fract();
+            // 采用 CairnPhi 的 9 抽头可分离高斯模糊算法与暗调衰减：
+            // 保证丝滑散焦的梦幻光晕，杜绝单遍模糊的生硬轮廓
+            let passes = if st.blur >= 45.0 { 3 } else { 2 };
+            let spread = (st.blur * scale / 14.0).clamp(1.2, 4.0);
             effects::cairn_phi_gaussian_blur(&mut buf, lw, lh, 4, passes, spread);
             effects::adjust_brightness(&mut buf, 0.95);
         }
